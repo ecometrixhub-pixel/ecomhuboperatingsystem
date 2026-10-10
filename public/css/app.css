@@ -905,3 +905,7 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .report .panel, .report .kpi { break-inside: avoid; box-shadow: none !important; }
   .report .table-wrap { overflow: visible !important; }
 }
+.fx-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+.fx-line .input { flex: 1 1 120px; }
+.fx-eq { font-weight: 600; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.fx-row { background: var(--section); border-radius: 10px; padding: 10px 12px; }

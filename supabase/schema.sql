@@ -2919,4 +2919,97 @@ grant execute on function public.can_money(text, text), public.fmt_money(numeric
   public.recurring_mark_paid(bigint, numeric, date), public.recurring_skip(bigint), public.finance_sweep(),
   public.finance_overview(), public.finance_report(date) to authenticated;
 
+
+
+-- =====================================================================
+--  PART 8 — Any currency for expenses, bills, salaries and investments.
+--  amount_original + currency = what was actually paid; fx_rate converts it
+--  to the app currency (Settings); amount = the converted value used in
+--  every total and report.
+-- =====================================================================
+
+do $$ declare t text; begin
+  foreach t in array array['expenses', 'recurring_expenses', 'investments'] loop
+    execute format('alter table public.%I add column if not exists currency text', t);
+    execute format('alter table public.%I add column if not exists amount_original numeric(14, 2)', t);
+    execute format('alter table public.%I add column if not exists fx_rate numeric(20, 10)', t);
+    execute format('update public.%I set currency = coalesce(currency, (select currency from public.app_settings where id = 1), ''USD''), amount_original = coalesce(amount_original, amount), fx_rate = coalesce(fx_rate, 1) where currency is null or amount_original is null or fx_rate is null', t);
+  end loop;
+end $$;
+
+grant update (currency, amount_original, fx_rate) on public.expenses, public.recurring_expenses, public.investments to authenticated;
+
+create or replace function public.money_before_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_base text := upper(coalesce((select currency from app_settings where id = 1), 'USD'));
+begin
+  if tg_op = 'INSERT' then
+    new.created_by := coalesce(auth.uid(), new.created_by); new.created_at := now();
+  else
+    new.created_by := old.created_by; new.created_at := old.created_at;
+    -- an older screen changed only the converted amount: keep the original in step
+    if new.amount is distinct from old.amount and new.amount_original is not distinct from old.amount_original then
+      new.amount_original := round(new.amount / nullif(coalesce(new.fx_rate, 1), 0), 2);
+    end if;
+  end if;
+  new.updated_at := now();
+  if tg_table_name = 'recurring_expenses' then
+    if new.category = 'salary' and new.payee_member is null then raise exception 'Pick the team member this salary is for'; end if;
+  end if;
+
+  new.currency := upper(coalesce(nullif(trim(new.currency), ''), v_base));
+  if new.currency !~ '^[A-Z]{3}$' then raise exception 'Pick a valid currency'; end if;
+  new.amount_original := coalesce(new.amount_original, new.amount);
+  if new.amount_original is null or new.amount_original < 0 then raise exception 'Enter the amount'; end if;
+  if new.currency = v_base then
+    new.fx_rate := 1;
+  elsif new.fx_rate is null or new.fx_rate <= 0 then
+    raise exception 'Add the exchange rate from % to %', new.currency, v_base;
+  end if;
+  new.amount := round(new.amount_original * new.fx_rate, 2);
+  return new;
+end $$;
+
+-- Posts a bill in its own currency (p_amount is in the bill's currency)
+create or replace function public.recurring_post(p_id bigint, p_amount numeric, p_paid_on date) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare r recurring_expenses%rowtype; v_id bigint;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  insert into expenses (title, category, currency, amount_original, fx_rate, amount, spent_on, vendor, payee_member, recurring_id, period, notes)
+  values (r.title, r.category, r.currency, coalesce(p_amount, r.amount_original, r.amount), r.fx_rate,
+          round(coalesce(p_amount, r.amount_original, r.amount) * coalesce(r.fx_rate, 1), 2),
+          coalesce(p_paid_on, r.next_due), r.vendor, r.payee_member, r.id, r.next_due,
+          case r.frequency when 'monthly' then 'For ' || to_char(r.next_due, 'Mon YYYY') else 'Due ' || to_char(r.next_due, 'DD Mon YYYY') end)
+  on conflict (recurring_id, period) where recurring_id is not null do nothing
+  returning id into v_id;
+  update recurring_expenses set next_due = advance_due(r.next_due, r.frequency) where id = p_id;
+  return v_id;
+end $$;
+
+-- Mark paid: amount in the bill's currency, optional fresh exchange rate (also saved on the bill)
+drop function if exists public.recurring_mark_paid(bigint, numeric, date);
+create or replace function public.recurring_mark_paid(p_id bigint, p_amount numeric default null, p_paid_on date default null, p_fx_rate numeric default null) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); r recurring_expenses%rowtype; v_id bigint;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  if not found then raise exception 'Bill not found'; end if;
+  if not can_money(r.category, 'edit') then raise exception 'You don''t have permission to record this payment'; end if;
+  if p_amount is not null and p_amount < 0 then raise exception 'Amount can''t be negative'; end if;
+  if p_fx_rate is not null then
+    if p_fx_rate <= 0 then raise exception 'The exchange rate must be above zero'; end if;
+    update recurring_expenses set fx_rate = p_fx_rate where id = p_id;
+  end if;
+  v_id := recurring_post(p_id, p_amount, coalesce(p_paid_on, (now() at time zone app_tz())::date));
+  perform log_event('recurring_paid', 'finance', p_id::text,
+    case when r.category = 'salary' then 'Paid salary of ' || coalesce(member_name(r.payee_member), 'a member') || ' for ' || to_char(r.next_due, 'Mon YYYY')
+         else 'Paid "' || r.title || '" due ' || to_char(r.next_due, 'DD Mon YYYY') end);
+  return v_id;
+end $$;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.money_before_write(), public.recurring_post(bigint, numeric, date) from authenticated;
+grant execute on function public.recurring_mark_paid(bigint, numeric, date, numeric) to authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).

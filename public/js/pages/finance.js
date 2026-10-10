@@ -5,6 +5,7 @@ import { state, can, money } from '../state.js';
 import { q, rpc, loadDirectory, dirName } from '../data.js';
 import { esc, icon, emptyState, loadingBlock, on, openModal, confirmDialog, toast, busy, downloadCSV } from '../ui.js';
 import { fmtDate, todayStr, daysBetween } from '../time.js';
+import { moneyFieldsHTML, bindMoneyFields, fmtCur, fmtPaid, baseCurrency, fetchRate } from '../currency.js';
 import { invoiceBadge, invoiceState, openInvoiceForm, openClientDrawer, INVOICE_STATUS } from './clients.js';
 
 export const CATS = {
@@ -89,7 +90,7 @@ export async function render({ el, params }) {
         <section class="panel"><div class="panel-head"><div><h2>Recent expenses</h2></div><button class="btn btn-sm btn-ghost" data-goto="expenses">All expenses</button></div>
           <div class="list">${recent.length ? recent.map((x) => `<div class="list-item" style="padding:10px 16px"><span class="cat-dot" style="background:${CAT_COLOR[x.category] || '#94A3B8'}"></span>
             <div class="grow"><div class="title">${esc(x.category === 'salary' ? `Salary: ${dirName(dir, x.payee_member) || x.title}` : x.title)}</div><div class="meta"><span>${esc(catName(x.category))}</span><span>${esc(fmtDate(x.spent_on))}</span>${x.recurring_id ? '<span>Recurring</span>' : ''}</div></div>
-            <b class="money">${money(x.amount)}</b></div>`).join('') : `<div class="panel-body"><p class="muted small">No expenses recorded yet.</p></div>`}</div></section>
+            <b class="money">${fmtPaid(x, money)}</b></div>`).join('') : `<div class="panel-body"><p class="muted small">No expenses recorded yet.</p></div>`}</div></section>
       </div>`;
   }
   function upcomingRow(u) {
@@ -121,7 +122,7 @@ export async function render({ el, params }) {
           <td><span class="cat-tag"><i style="background:${CAT_COLOR[x.category] || '#94A3B8'}"></i>${esc(catName(x.category))}</span></td>
           <td class="small">${esc(fmtDate(x.spent_on))}</td>
           <td class="small">${esc(dirName(dir, x.paid_by) || '—')}</td>
-          <td class="r money"><b>${money(x.amount)}</b></td>
+          <td class="r money"><b>${fmtPaid(x, money)}</b></td>
           <td class="r nowrap">${edit ? `<button class="btn btn-sm btn-ghost btn-icon" data-edit-exp="${x.id}" aria-label="Edit">${icon('edit', 13)}</button>` : ''}${del ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-exp="${x.id}" aria-label="Delete">${icon('trash', 13)}</button>` : ''}</td>
         </tr>`).join('')}</tbody>
         <tfoot><tr><td colspan="4">Total${expCat ? ` (${esc(catName(expCat))})` : ''}</td><td class="r money">${money(total)}</td><td></td></tr></tfoot></table>`
@@ -129,8 +130,8 @@ export async function render({ el, params }) {
     body.querySelector('#exp-cat').onchange = (e) => { expCat = e.target.value; expenses(); };
     const qi = body.querySelector('#exp-q');
     qi.oninput = () => { expSearch = qi.value.trim(); clearTimeout(qi._t); qi._t = setTimeout(() => expenses().then(() => { const n = body.querySelector('#exp-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }), 250); };
-    body.querySelector('[data-exp-csv]').onclick = () => downloadCSV(`expenses-${expMonth}.csv`, [['Date', 'Expense', 'Category', 'Vendor', 'Paid by', 'For', 'Amount', 'Notes'],
-      ...list.map((x) => [x.spent_on, x.title, catName(x.category), x.vendor || '', dirName(dir, x.paid_by), dirName(dir, x.payee_member), x.amount, x.notes])]);
+    body.querySelector('[data-exp-csv]').onclick = () => downloadCSV(`expenses-${expMonth}.csv`, [['Date', 'Expense', 'Category', 'Vendor', 'Paid by', 'For', 'Currency', 'Amount paid', 'Rate', `Amount (${baseCurrency()})`, 'Notes'],
+      ...list.map((x) => [x.spent_on, x.title, catName(x.category), x.vendor || '', dirName(dir, x.paid_by), dirName(dir, x.payee_member), x.currency || baseCurrency(), x.amount_original ?? x.amount, x.fx_rate ?? 1, x.amount, x.notes])]);
     body.querySelectorAll('[data-edit-exp]').forEach((b) => b.onclick = () => expenseForm(rows.find((x) => x.id === Number(b.dataset.editExp))));
     body.querySelectorAll('[data-del-exp]').forEach((b) => b.onclick = async () => {
       const x = rows.find((r) => r.id === Number(b.dataset.delExp));
@@ -154,7 +155,7 @@ export async function render({ el, params }) {
       return `<div class="list-item bill ${r.active ? '' : 'off'}" style="flex-wrap:wrap">
         <span class="cat-dot" style="background:${CAT_COLOR[r.category] || '#94A3B8'}"></span>
         <div class="grow" style="min-width:180px"><div class="title">${esc(name)}${r.active ? '' : ' <span class="badge paused">Paused</span>'}</div>
-          <div class="meta"><span>${money(r.amount)} ${esc(FREQ[r.frequency].toLowerCase())}</span>${r.vendor ? `<span>${esc(r.vendor)}</span>` : ''}
+          <div class="meta"><span>${fmtPaid(r, money)} ${esc(FREQ[r.frequency].toLowerCase())}</span>${r.vendor ? `<span>${esc(r.vendor)}</span>` : ''}
             ${r.active ? (d < 0 ? `<span class="due over">Overdue since ${esc(fmtDate(r.next_due))}</span>` : `<span class="due ${d <= r.remind_days ? 'soon' : ''}">Next ${esc(fmtDate(r.next_due))}</span>`) : ''}
             <span>${r.auto_post ? 'Charged automatically' : `Reminder ${r.remind_days} day${r.remind_days === 1 ? '' : 's'} before`}</span></div></div>
         ${edit && r.active ? `<button class="btn btn-sm" data-pay="${r.id}">${icon('check', 13)}${r.category === 'salary' ? 'Mark paid' : 'Paid'}</button><button class="btn btn-sm btn-ghost" data-skip="${r.id}" title="Skip this one">Skip</button>` : ''}
@@ -196,7 +197,7 @@ export async function render({ el, params }) {
       <section class="panel" style="margin-top:16px"><div class="table-wrap">${rows.length ? `<table class="table">
         <thead><tr><th>From</th><th>Type</th><th>Date</th><th>Notes</th><th class="r">Amount</th><th></th></tr></thead>
         <tbody>${rows.map((r) => `<tr><td style="font-weight:500">${esc(dirName(dir, r.investor_id) || r.source)}</td><td><span class="chip">${esc(KIND[r.kind] || r.kind)}</span></td>
-          <td class="small">${esc(fmtDate(r.invested_on))}</td><td class="small muted">${esc(r.notes || '')}</td><td class="r money"><b>${money(r.amount)}</b></td>
+          <td class="small">${esc(fmtDate(r.invested_on))}</td><td class="small muted">${esc(r.notes || '')}</td><td class="r money"><b>${fmtPaid(r, money)}</b></td>
           <td class="r nowrap">${edit ? `<button class="btn btn-sm btn-ghost btn-icon" data-edit-inv-x="${r.id}" aria-label="Edit">${icon('edit', 13)}</button>` : ''}${del ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-inv-x="${r.id}" aria-label="Delete">${icon('trash', 13)}</button>` : ''}</td></tr>`).join('')}</tbody>
         <tfoot><tr><td colspan="4">Total</td><td class="r money">${money(total)}</td><td></td></tr></tfoot></table>`
         : emptyState('No investments yet', 'Record money the co-founders or anyone else put into the business.', edit ? '<button class="btn btn-primary" data-add="investment">Add investment</button>' : '')}</div></section>`;
@@ -330,8 +331,8 @@ export async function render({ el, params }) {
       body: `<form id="xf" class="form-grid" novalidate>
         <div class="field span-2"><label for="xf-title">What was it for?</label><input id="xf-title" class="input" maxlength="200" value="${esc(e0.title)}" placeholder="e.g. Canva Pro, office rent, Fiverr designer"></div>
         <div class="field"><label for="xf-cat">Category</label><select id="xf-cat" class="select">${Object.entries(CATS).filter(([k]) => k !== 'salary' || salaryOk()).map(([k, v]) => `<option value="${k}" ${e0.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-        <div class="field"><label for="xf-amount">Amount (${esc(state.settings.currency || 'USD')})</label><input id="xf-amount" class="input" type="number" min="0" step="0.01" value="${esc(e0.amount)}"></div>
         <div class="field"><label for="xf-date">Date</label><input id="xf-date" class="input" type="date" value="${esc(e0.spent_on)}"></div>
+        ${moneyFieldsHTML({ id: 'xf', currency: x?.currency, amount: x ? (x.amount_original ?? x.amount) : '', rate: x?.fx_rate })}
         <div class="field"><label for="xf-vendor">Paid to (vendor)</label><input id="xf-vendor" class="input" maxlength="120" value="${esc(e0.vendor || '')}" placeholder="Canva, landlord, Upwork…"></div>
         <div class="field xf-salary ${e0.category === 'salary' ? '' : 'hidden'}"><label for="xf-payee">Salary for</label><select id="xf-payee" class="select"><option value="">Choose a member</option>${membersOptions(e0.payee_member)}</select></div>
         <div class="field"><label for="xf-paidby">Paid by</label><select id="xf-paidby" class="select"><option value="">Business account</option>${membersOptions(e0.paid_by, { managersOnly: true })}</select><span class="hint">Pick a co-founder if they paid from their own pocket.</span></div>
@@ -339,18 +340,20 @@ export async function render({ el, params }) {
         <div class="form-error hidden span-2" id="xf-err"></div></form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${x ? 'Save' : 'Add expense'}</button>`,
     });
+    const xm = bindMoneyFields(m, { id: 'xf', money });
     const cat = m.querySelector('#xf-cat');
     cat.onchange = () => m.querySelector('.xf-salary').classList.toggle('hidden', cat.value !== 'salary');
     m.querySelector('[data-cancel]').onclick = () => m.close();
     const err = m.querySelector('#xf-err');
     m.querySelector('[data-save]').onclick = (ev) => busy(ev.currentTarget, async () => {
       const v = (s) => m.querySelector(s).value.trim();
-      const p = { title: v('#xf-title'), category: v('#xf-cat'), amount: Number(v('#xf-amount')), spent_on: v('#xf-date') || todayStr(), vendor: v('#xf-vendor') || null,
+      const mv = xm.read();
+      const p = { title: v('#xf-title'), category: v('#xf-cat'), currency: mv.currency, amount_original: mv.amount_original, fx_rate: mv.fx_rate, amount: mv.amount, spent_on: v('#xf-date') || todayStr(), vendor: v('#xf-vendor') || null,
         paid_by: v('#xf-paidby') || null, payee_member: v('#xf-cat') === 'salary' ? (v('#xf-payee') || null) : null, notes: v('#xf-notes') };
       const fail = (t) => { err.textContent = t; err.classList.remove('hidden'); };
       if (p.category === 'salary' && !p.title && p.payee_member) p.title = `Salary – ${dirName(dir, p.payee_member)}`;
       if (!p.title) return fail('Write what the expense was for.');
-      if (v('#xf-amount') === '' || !(p.amount >= 0)) return fail('Enter the amount.');
+      if (mv.error) return fail(mv.error);
       try {
         if (x) await q(supabase.from('expenses').update(p).eq('id', x.id)); else await q(supabase.from('expenses').insert(p));
         toast(x ? 'Expense saved' : 'Expense added'); m.close(); changed();
@@ -367,7 +370,7 @@ export async function render({ el, params }) {
         ${isSal ? `<div class="field span-2"><label for="bf-payee">Team member</label><select id="bf-payee" class="select"><option value="">Choose a member</option>${membersOptions(b0.payee_member)}</select></div>`
           : `<div class="field"><label for="bf-title">Name</label><input id="bf-title" class="input" maxlength="200" value="${esc(b0.title)}" placeholder="e.g. Canva Pro, Shopify, ChatGPT, office rent"></div>
              <div class="field"><label for="bf-cat">Category</label><select id="bf-cat" class="select">${Object.entries(CATS).filter(([k]) => k !== 'salary').map(([k, v]) => `<option value="${k}" ${b0.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`}
-        <div class="field"><label for="bf-amount">Amount (${esc(state.settings.currency || 'USD')})</label><input id="bf-amount" class="input" type="number" min="0" step="0.01" value="${esc(b0.amount)}"></div>
+        ${moneyFieldsHTML({ id: 'bf', label: isSal ? 'Salary' : 'Amount', currency: bill?.currency, amount: bill ? (bill.amount_original ?? bill.amount) : '', rate: bill?.fx_rate })}
         <div class="field"><label for="bf-freq">How often</label><select id="bf-freq" class="select">${Object.entries(FREQ).map(([k, v]) => `<option value="${k}" ${b0.frequency === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
         <div class="field"><label for="bf-due">${isSal ? 'Next payday' : 'Next due date'}</label><input id="bf-due" class="input" type="date" value="${esc(b0.next_due)}"></div>
         <div class="field"><label for="bf-remind">Remind me</label><select id="bf-remind" class="select">${[0, 1, 2, 3, 5, 7, 14].map((d) => `<option value="${d}" ${Number(b0.remind_days) === d ? 'selected' : ''}>${d ? `${d} day${d === 1 ? '' : 's'} before` : 'On the day'}</option>`).join('')}</select></div>
@@ -379,18 +382,20 @@ export async function render({ el, params }) {
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${bill ? 'Save' : 'Add'}</button>`,
     });
     m.querySelector('[data-cancel]').onclick = () => m.close();
+    const bm = bindMoneyFields(m, { id: 'bf', money });
     const err = m.querySelector('#bf-err');
     m.querySelector('[data-save]').onclick = (ev) => busy(ev.currentTarget, async () => {
       const v = (s) => m.querySelector(s)?.value.trim() ?? '';
       const fail = (t) => { err.textContent = t; err.classList.remove('hidden'); };
       const payee = isSal ? v('#bf-payee') : null;
-      const p = { title: isSal ? `Salary – ${dirName(dir, payee)}` : v('#bf-title'), category: isSal ? 'salary' : v('#bf-cat'), amount: Number(v('#bf-amount')),
+      const mv = bm.read();
+      const p = { title: isSal ? `Salary – ${dirName(dir, payee)}` : v('#bf-title'), category: isSal ? 'salary' : v('#bf-cat'), currency: mv.currency, amount_original: mv.amount_original, fx_rate: mv.fx_rate, amount: mv.amount,
         frequency: v('#bf-freq'), next_due: v('#bf-due'), remind_days: Number(v('#bf-remind')), vendor: isSal ? null : (v('#bf-vendor') || null),
         payee_member: payee || null, auto_post: m.querySelector('#bf-auto').checked, notes: v('#bf-notes') };
       if (bill) p.active = m.querySelector('#bf-active').checked;
       if (isSal && !payee) return fail('Choose the team member.');
       if (!isSal && !p.title) return fail('Give the bill a name.');
-      if (v('#bf-amount') === '' || !(p.amount >= 0)) return fail('Enter the amount.');
+      if (mv.error) return fail(mv.error);
       if (!p.next_due) return fail('Pick the next due date.');
       try {
         if (bill) await q(supabase.from('recurring_expenses').update(p).eq('id', bill.id)); else await q(supabase.from('recurring_expenses').insert(p));
@@ -402,19 +407,29 @@ export async function render({ el, params }) {
 
   function payForm(r) {
     const name = r.category === 'salary' ? `salary of ${dirName(dir, r.payee_member) || 'member'}` : r.title;
+    const cur = (r.currency || baseCurrency()).toUpperCase(); const base = baseCurrency();
     const m = openModal({
       title: `Mark ${name} as paid`, icon: 'check',
       body: `<form class="form-grid" novalidate>
-        <div class="field"><label for="pf-amount">Amount paid</label><input id="pf-amount" class="input" type="number" min="0" step="0.01" value="${esc(r.amount)}"></div>
+        <div class="field"><label for="pf-amount">Amount paid (${esc(cur)})</label><div class="money-input"><span>${esc(cur)}</span><input id="pf-amount" class="input" type="number" min="0" step="0.01" value="${esc(r.amount_original ?? r.amount)}"></div></div>
         <div class="field"><label for="pf-date">Paid on</label><input id="pf-date" class="input" type="date" value="${esc(todayStr())}"></div>
+        ${cur !== base ? `<div class="field span-2"><label for="pf-rate">Exchange rate</label><div class="fx-line"><span>1 <b>${esc(cur)}</b> =</span><input id="pf-rate" class="input" type="number" min="0" step="any" value="${esc(r.fx_rate || '')}" style="max-width:160px"><span>${esc(base)}</span><span class="fx-eq" id="pf-eq"></span></div>
+          <span class="hint" id="pf-hint">Last rate used for this bill. Change it to the rate you actually paid.</span></div>` : ''}
         <p class="small muted span-2">This records an expense for the payment due ${esc(fmtDate(r.next_due))}, and the next one moves to the following ${r.frequency === 'monthly' ? 'month' : 'period'}.</p></form>`,
       foot: '<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>Mark paid</button>',
     });
+    const amt = m.querySelector('#pf-amount'); const rate = m.querySelector('#pf-rate');
+    const eq = () => { const e = m.querySelector('#pf-eq'); if (e) e.textContent = Number(rate.value) > 0 && amt.value !== '' ? `≈ ${money(Number(amt.value) * Number(rate.value))}` : ''; };
+    if (rate) {
+      amt.oninput = eq; rate.oninput = eq; eq();
+      fetchRate(cur).then((live) => { if (live && m.isConnected) { const h = m.querySelector('#pf-hint'); h.textContent = `Today's rate is about ${Number(live.toPrecision(6))} ${base}. Last time you used ${r.fx_rate}.`; } });
+    }
     m.querySelector('[data-cancel]').onclick = () => m.close();
     m.querySelector('[data-save]').onclick = (ev) => busy(ev.currentTarget, async () => {
-      const amt = Number(m.querySelector('#pf-amount').value);
-      if (!(amt >= 0)) return toast('Enter the amount', 'error');
-      try { await rpc('recurring_mark_paid', { p_id: r.id, p_amount: amt, p_paid_on: m.querySelector('#pf-date').value || null }); toast('Payment recorded'); m.close(); changed(); }
+      const a = Number(amt.value);
+      if (amt.value === '' || !(a >= 0)) return toast('Enter the amount', 'error');
+      if (rate && !(Number(rate.value) > 0)) return toast('Add the exchange rate', 'error');
+      try { await rpc('recurring_mark_paid', { p_id: r.id, p_amount: a, p_paid_on: m.querySelector('#pf-date').value || null, p_fx_rate: rate ? Number(rate.value) : null }); toast('Payment recorded'); m.close(); changed(); }
       catch (e) { toast(e.message, 'error'); }
     });
   }
@@ -422,17 +437,18 @@ export async function render({ el, params }) {
   function investmentForm(x = null) {
     const i0 = x || { source: '', investor_id: '', kind: 'capital', amount: '', invested_on: todayStr(), notes: '' };
     const m = openModal({
-      title: x ? 'Edit investment' : 'Add investment', icon: 'trending',
+      title: x ? 'Edit investment' : 'Add investment', icon: 'trending', wide: true,
       body: `<form class="form-grid" novalidate>
         <div class="field span-2"><label for="if-who">Who invested</label><select id="if-who" class="select"><option value="">Someone outside the team</option>${membersOptions(i0.investor_id, { managersOnly: true })}</select></div>
         <div class="field span-2 ${i0.investor_id ? 'hidden' : ''}" id="if-src-wrap"><label for="if-src">Name</label><input id="if-src" class="input" maxlength="200" value="${esc(i0.investor_id ? '' : i0.source)}" placeholder="Investor or lender name"></div>
-        <div class="field"><label for="if-amount">Amount (${esc(state.settings.currency || 'USD')})</label><input id="if-amount" class="input" type="number" min="0" step="0.01" value="${esc(i0.amount)}"></div>
+        ${moneyFieldsHTML({ id: 'if', currency: x?.currency, amount: x ? (x.amount_original ?? x.amount) : '', rate: x?.fx_rate })}
         <div class="field"><label for="if-date">Date</label><input id="if-date" class="input" type="date" value="${esc(i0.invested_on)}"></div>
-        <div class="field span-2"><label for="if-kind">Type</label><select id="if-kind" class="select">${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${i0.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="field"><label for="if-kind">Type</label><select id="if-kind" class="select">${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${i0.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
         <div class="field span-2"><label for="if-notes">Notes</label><textarea id="if-notes" class="textarea" rows="2">${esc(i0.notes || '')}</textarea></div>
         <div class="form-error hidden span-2" id="if-err"></div></form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${x ? 'Save' : 'Add investment'}</button>`,
     });
+    const im = bindMoneyFields(m, { id: 'if', money });
     const who = m.querySelector('#if-who');
     who.onchange = () => m.querySelector('#if-src-wrap').classList.toggle('hidden', Boolean(who.value));
     m.querySelector('[data-cancel]').onclick = () => m.close();
@@ -440,10 +456,11 @@ export async function render({ el, params }) {
     m.querySelector('[data-save]').onclick = (ev) => busy(ev.currentTarget, async () => {
       const v = (s) => m.querySelector(s).value.trim();
       const fail = (t) => { err.textContent = t; err.classList.remove('hidden'); };
-      const p = { investor_id: v('#if-who') || null, source: v('#if-who') ? dirName(dir, v('#if-who')) : v('#if-src'), amount: Number(v('#if-amount')),
+      const mv = im.read();
+      const p = { investor_id: v('#if-who') || null, source: v('#if-who') ? dirName(dir, v('#if-who')) : v('#if-src'), currency: mv.currency, amount_original: mv.amount_original, fx_rate: mv.fx_rate, amount: mv.amount,
         invested_on: v('#if-date') || todayStr(), kind: v('#if-kind'), notes: v('#if-notes') };
       if (!p.source) return fail('Who invested?');
-      if (v('#if-amount') === '' || !(p.amount >= 0)) return fail('Enter the amount.');
+      if (mv.error) return fail(mv.error);
       try {
         if (x) await q(supabase.from('investments').update(p).eq('id', x.id)); else await q(supabase.from('investments').insert(p));
         toast(x ? 'Saved' : 'Investment added'); m.close(); changed();

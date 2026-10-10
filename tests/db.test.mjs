@@ -542,5 +542,21 @@ await as(MG, async () => {
   ok((await q(`select count(*)::int c from expenses where title='Canva Pro'`))[0].c === 1, 'past tool charges stay after the bill is removed');
 });
 
+console.log('Part 8: any currency');
+await as(MG, async () => {
+  const [e] = await q(`insert into expenses (title, category, currency, amount_original, fx_rate) values ('Hosting PK', 'tools', 'PKR', 2800, 0.0036) returning amount, currency`);
+  ok(Number(e.amount) === 10.08 && e.currency === 'PKR', 'PKR expense converted to app currency (' + e.amount + ')');
+  await expectErr(() => q(`insert into expenses (title, currency, amount_original) values ('x', 'GBP', 10)`), 'foreign currency needs an exchange rate', /exchange rate/);
+  const [b] = await q(`insert into expenses (title, amount) values ('Old screen', 25) returning currency, amount_original, fx_rate`);
+  ok(b.currency === 'USD' && Number(b.amount_original) === 25 && Number(b.fx_rate) === 1, 'amount without currency = app currency');
+  const [bill] = await q(`insert into recurring_expenses (title, category, currency, amount_original, fx_rate, next_due) values ('Office rent PK', 'rent', 'PKR', 50000, 0.0036, current_date) returning id, amount`);
+  ok(Number(bill.amount) === 180, 'bill stored in PKR with converted amount');
+  await q(`select recurring_mark_paid($1, 52000, null, 0.0035)`, [bill.id]);
+  const [x] = await q(`select currency, amount_original, amount from expenses where recurring_id=$1`, [bill.id]);
+  ok(x.currency === 'PKR' && Number(x.amount_original) === 52000 && Number(x.amount) === 182, 'paid in PKR at the new rate (' + x.amount + ')');
+  const [inv] = await q(`insert into investments (source, currency, amount_original, fx_rate) values ('Uncle', 'AED', 1000, 0.27) returning amount`);
+  ok(Number(inv.amount) === 270, 'AED investment converted');
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
