@@ -39,7 +39,7 @@
 **Supabase Auth → URL config:** Site URL = live URL; redirect URL = `<live URL>/set-password.html`.
 
 ### Delivery routine after every change
-1. Edit files, run `npm test` (DB tests, currently **243 passing**), `node --check` the changed JS, and check the page in a headless browser.
+1. Edit files, run `npm test` (DB tests, currently **254 passing**), `node --check` the changed JS, and check the page in a headless browser.
 2. Copy the changed files to the owner's local folder (when his computer is linked), or give them to him.
 3. Tell him in Hinglish:
    - Run the whole `supabase/schema.sql` in Supabase → SQL Editor, **only if the schema changed**. It is safe to re-run.
@@ -57,7 +57,7 @@
 
 - **Frontend:** plain HTML + CSS + vanilla JS ES modules in `public/`. No React, no bundler, no build step.
 - **Server:** Node + Express in `server.js`. On Vercel it runs as one function, and `public/**` is served by the CDN.
-- **Database:** Supabase. All tables, RLS, triggers and RPCs live in **`supabase/schema.sql`**, an idempotent file in **11 parts**. New changes go in a new part at the bottom.
+- **Database:** Supabase. All tables, RLS, triggers and RPCs live in **`supabase/schema.sql`**, an idempotent file in **12 parts**. New changes go in a new part at the bottom.
 - **Browser Supabase client:** `@supabase/supabase-js@2.117.2` from jsDelivr. The browser gets the URL + publishable key from `GET /api/config`.
 - **Tests:** `tests/db.test.mjs` runs the whole schema in PGlite (in-memory Postgres) and checks RLS, permissions, timers, notifications and finance. Add tests for every schema change.
 - **Logo:** EcomHub OS logo = `public/logo.png` (sidebar, login, set-password, lead form) + `favicon-64.png` + `apple-touch-icon.png`. To change it, replace these files (made from the owner's original `ecomhuboslogo.png`, kept out of git because it's 9 MB). The invoice has its own logo upload in Settings.
@@ -173,6 +173,7 @@
      - A new, already-paid bill records that payment as an expense.
      - **Charged automatically** posts the expense on the renewal date. Otherwise press **Mark paid**; **Skip** is also available.
      - Paying a one-time bill closes it.
+  - **Attachments:** Add/Edit expense, Add/Edit bill and **Mark paid** have an **Attachments** box → upload a PDF or image (PNG/JPG/WEBP, 10 MB each, up to 10 files): receipt, invoice, screenshot. A 📎 count shows in the Expenses list and on bills; click it to open. Files are private (bucket `finance-files`): only people who can see that expense/bill can open them; salary files only Admin + Managers. Deleting the expense/bill deletes its files.
   4. **Investments:** who put money in (co-founder or outside), capital/loan/grant.
   5. **Client invoices:** choose the client first (search by name or BUID) → add lines (description, qty, price), discount, tax %, any currency → **Create invoice** → the invoice opens → **Print / save PDF**. Number is automatic: **INV-BUID-HF001**, HF002 … per client. Date, reference (REF-YYMMDD-id) and **Issued by (name + designation)** are automatic too. CSV.
   6. **Business invoices:** our own invoices for someone who isn't a client in the app (type name/company). Numbers **INV-EH001**, EH002 … Paid ones count as revenue too.
@@ -209,8 +210,8 @@
 
 ```
 supabase/schema.sql      Parts 1–10: core, leads/clients/finance perms, notifications, projects,
-                         workspace, sales routing, business finance, currencies, one-time bills, invoices v2 (BUID), invoice template fields (Part 11)
-tests/db.test.mjs        DB test suite (243 checks)
+                         workspace, sales routing, business finance, currencies, one-time bills, invoices v2 (BUID), invoice template fields (Part 11), finance attachments (Part 12)
+tests/db.test.mjs        DB test suite (254 checks)
 server.js                /api/config, /api/members*, /api/setup/founders, /api/public/form, /api/public/lead
 public/app.html          The app shell; login.html, set-password.html, lead-form.html
 public/js/app.js         Boot, sidebar per role, router (#/route, #/role/<key>, #/project/<id>), finance_sweep on load
@@ -278,4 +279,4 @@ The owner wants a **full walkthrough video of EcomHub OS** for the team. When he
 
 ---
 
-*Last updated: 10 Oct 2026, after Part 11 (invoice template from Ecometrix_Hub_07_Invoice.docx: billing period, client address, bank/Wise table, terms days).*
+*Last updated: 10 Oct 2026, after Part 12 (attachments on expenses, bills and Mark paid) + new EcomHub OS logo.*
