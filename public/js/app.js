@@ -117,7 +117,7 @@ function renderShell() {
     <div class="shell">
       <aside class="sidebar" aria-label="Main navigation">
         <div class="brand">
-          <div class="brand-mark">EH</div>
+          <img class="brand-mark" src="/logo.png" alt="EcomHub OS" width="32" height="32">
           <div class="brand-name">EcomHub OS<small>${esc(state.settings.company_name || 'Ecometrix Hub')}</small></div>
         </div>
         <nav class="nav">

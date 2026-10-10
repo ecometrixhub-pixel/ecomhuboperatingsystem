@@ -60,6 +60,7 @@
 - **Database:** Supabase. All tables, RLS, triggers and RPCs live in **`supabase/schema.sql`**, an idempotent file in **11 parts**. New changes go in a new part at the bottom.
 - **Browser Supabase client:** `@supabase/supabase-js@2.117.2` from jsDelivr. The browser gets the URL + publishable key from `GET /api/config`.
 - **Tests:** `tests/db.test.mjs` runs the whole schema in PGlite (in-memory Postgres) and checks RLS, permissions, timers, notifications and finance. Add tests for every schema change.
+- **Logo:** EcomHub OS logo = `public/logo.png` (sidebar, login, set-password, lead form) + `favicon-64.png` + `apple-touch-icon.png`. To change it, replace these files (made from the owner's original `ecomhuboslogo.png`, kept out of git because it's 9 MB). The invoice has its own logo upload in Settings.
 - **Design:**
   - Light theme, font Geist, accent indigo `#4F46E5`.
   - Success `#16A34A`, warning `#D97706`, error `#DC2626`.
