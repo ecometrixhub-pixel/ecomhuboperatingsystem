@@ -94,35 +94,60 @@ if (page === 'login') {
 }
 
 // ---------------- Set password (invite or reset link) ----------------
+// New links: /set-password.html?token_hash=…&type=invite|recovery — the token is used only when the person
+// presses Continue, so link previews (WhatsApp, email scanners) can't use it up first.
+// Old links (#access_token=… from Supabase) still work.
 if (page === 'set-password') {
   const hash = new URLSearchParams((window.__authHash || '').replace(/^#/, ''));
   const query = new URLSearchParams(window.__authQuery || '');
   const linkError = hash.get('error_description') || query.get('error_description');
-  const type = hash.get('type') || query.get('type') || '';
+  const tokenHash = query.get('token_hash');
+  const type = query.get('type') || hash.get('type') || '';
   if (type === 'recovery') $('sp-title').textContent = 'Choose a new password';
 
-  const { data: { session } } = await supabase.auth.getSession();
-  if (linkError || !session) {
+  const expired = (msg) => {
     $('sp-sub').textContent = '';
-    show('error', linkError && /expired|invalid/i.test(linkError)
-      ? 'This link has expired or was already used. Ask your admin for a new link.'
-      : linkError || 'Open this page from the link your admin shared with you. If the link is old, ask for a new one.');
-    $('msg').insertAdjacentHTML('afterend', '<a class="btn btn-block" href="/login.html">Go to sign in</a>');
-  } else {
-    $('sp-sub').textContent = `Signed in as ${session.user.email}. Choose a password you'll use to sign in.`;
+    show('error', msg && !/expired|invalid/i.test(msg) ? msg : 'This link has expired or was already used. Ask your admin for a new link (Team → your name → Password reset link).');
+    if (!document.getElementById('to-signin')) $('msg').insertAdjacentHTML('afterend', '<a class="btn btn-block" id="to-signin" href="/login.html">Go to sign in</a>');
+  };
+  const showForm = (email) => {
+    hideMsg();
+    $('sp-sub').textContent = `Signed in as ${email}. Choose a password you'll use to sign in.`;
     $('sp-form').classList.remove('hidden');
     $('pw1').focus();
-    $('sp-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      hideMsg();
-      const a = $('pw1').value; const b = $('pw2').value;
-      if (a.length < 8) return show('error', 'Use at least 8 characters.');
-      if (a !== b) return show('error', 'The two passwords don\'t match.');
-      withButton(e.target.querySelector('[type=submit]'), 'Saving…', async () => {
-        const { error } = await supabase.auth.updateUser({ password: a });
-        if (error) return show('error', /same/i.test(error.message) ? 'Pick a password different from your old one.' : error.message);
-        goToApp();
-      });
+  };
+
+  $('sp-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    hideMsg();
+    const a = $('pw1').value; const b = $('pw2').value;
+    if (a.length < 8) return show('error', 'Use at least 8 characters.');
+    if (a !== b) return show('error', 'The two passwords don\'t match.');
+    withButton(e.target.querySelector('[type=submit]'), 'Saving…', async () => {
+      const { error } = await supabase.auth.updateUser({ password: a });
+      if (error) return show('error', /same/i.test(error.message) ? 'Pick a password different from your old one.' : error.message);
+      goToApp();
     });
+  });
+
+  if (linkError) {
+    expired(linkError);
+  } else if (tokenHash) {
+    // Someone else may be signed in on this browser (e.g. the admin testing the link): never change their password
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    $('sp-sub').textContent = type === 'recovery' ? 'Press Continue to choose a new password.' : 'Welcome! Press Continue to set your password.';
+    $('sp-sub').insertAdjacentHTML('afterend', '<button class="btn btn-primary btn-lg btn-block" id="sp-go" type="button" style="margin-top:14px">Continue</button>');
+    const go = $('sp-go');
+    go.onclick = () => withButton(go, 'Checking…', async () => {
+      const { data, error } = await supabase.auth.verifyOtp({ token_hash: tokenHash, type: type === 'invite' ? 'invite' : 'recovery' });
+      if (error || !data?.session) return expired(error?.message);
+      go.remove();
+      try { history.replaceState(null, '', '/set-password.html'); } catch { /* ignore */ }
+      showForm(data.session.user.email);
+    });
+  } else {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) expired('Open this page from the link your admin shared with you. If the link is old, ask for a new one.');
+    else showForm(session.user.email);
   }
 }
