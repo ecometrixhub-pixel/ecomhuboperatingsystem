@@ -28,7 +28,7 @@ export async function render({ el }) {
           <p class="small muted" style="margin-top:12px">The admin manages your roles, job title and department.</p>
         </div></section>
         <section class="panel"><div class="panel-body">
-          <div class="section-title">${icon('shield', 14)} How tracking works</div>
+          <div class="section-title" style="justify-content:flex-start">${icon('shield', 14)} How tracking works</div>
           <p class="small" style="color:var(--ink-2);line-height:1.6">EcomHub OS records when you sign in and out, whether you're active or idle in this tab (idle after ${state.settings.idle_minutes} minutes without a click, key press or scroll), and the time you log with task timers. It does not record what you type, take screenshots, or see other apps. Your records are under <a href="#/my-activity">My activity</a> and <a href="#/my-time">My work time</a>.</p>
         </div></section>
       </div>

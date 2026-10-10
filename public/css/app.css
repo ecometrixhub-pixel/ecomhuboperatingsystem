@@ -693,3 +693,41 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .notif .b { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .notif .w { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 .notif .u { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 6px; flex: none; }
+
+/* ---------- Collapsible sidebar ---------- */
+.collapse-btn { margin-left: -8px; }
+.shell { transition: grid-template-columns .18s ease; }
+@media (min-width: 901px) {
+.shell.collapsed { grid-template-columns: 72px 1fr; }
+.shell.collapsed .sidebar { padding: 14px 10px; }
+.shell.collapsed .brand { justify-content: center; padding: 6px 0 18px; }
+.shell.collapsed .brand-name,
+.shell.collapsed .nav a span,
+.shell.collapsed .nav-title,
+.shell.collapsed .tracking-note,
+.shell.collapsed .me .who > div,
+.shell.collapsed .nav a .role-dot { display: none; }
+.shell.collapsed .nav a { justify-content: center; padding: 0; }
+.shell.collapsed .nav a svg { width: 18px; height: 18px; }
+.shell.collapsed .me { flex-direction: column; gap: 8px; padding: 6px 0; }
+.shell.collapsed .nav-title + a, .shell.collapsed .nav a[data-route^="role/"]:first-of-type { margin-top: 8px; }
+}
+
+/* ---------- Account menu (top right) ---------- */
+.pmenu-wrap { display: flex; }
+.pmenu-btn { border: 0; background: none; padding: 2px; border-radius: 50%; cursor: pointer; display: grid; }
+.pmenu-btn:hover .avatar, .pmenu-btn[aria-expanded="true"] .avatar { box-shadow: 0 0 0 3px var(--accent-bg); }
+.pmenu { position: fixed; z-index: 75; top: 56px; right: 16px; width: 272px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 6px; animation: pop2 .15s ease-out; }
+.pmenu-head { display: flex; gap: 12px; align-items: center; padding: 10px 10px 12px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.pmenu-head .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pmenu-head .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pmenu a, .pmenu button { display: flex; align-items: center; gap: 10px; width: 100%; height: 38px; padding: 0 10px; border: 0; background: none; border-radius: var(--r-md); color: var(--ink-2); font-weight: 500; font-size: 13.5px; text-decoration: none; cursor: pointer; }
+.pmenu a svg, .pmenu button svg { color: var(--muted); }
+.pmenu a:hover, .pmenu button:hover { background: var(--section); color: var(--ink); }
+.pmenu .danger, .pmenu .danger svg { color: var(--error); }
+.pmenu .danger:hover { background: var(--error-bg); }
+.pmenu-sep { height: 1px; background: var(--line); margin: 6px 0; }
+@media (max-width: 900px) {
+  .collapse-btn { display: none; }
+}
+}

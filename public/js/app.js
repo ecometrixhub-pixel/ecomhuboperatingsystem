@@ -94,7 +94,7 @@ async function boot() {
 function navItems() {
   if (!state.isAdmin) return memberNav();
   const items = ADMIN_NAV.filter((n) => !n.owner || state.isOwner);
-  return state.isOwner ? items : items.concat(MANAGER_SELF);
+  return state.isOwner ? items.concat([{ route: 'profile', label: 'Profile', icon: 'user', page: 'profile', hidden: true }]) : items.concat(MANAGER_SELF);
 }
 
 function renderShell() {
@@ -104,7 +104,7 @@ function renderShell() {
     <div class="nav-title">My roles</div>
     ${state.myRoles.map((key) => {
       const r = state.roles.find((x) => x.key === key);
-      return `<a href="#/role/${esc(key)}" data-route="role/${esc(key)}">${icon(ROLE_ICONS[key] || 'briefcase')}<span style="flex:1">${esc(r?.name || key)}</span><span class="role-dot" data-role="${esc(key)}"></span></a>`;
+      return `<a href="#/role/${esc(key)}" data-route="role/${esc(key)}" title="${esc(r?.name || key)}">${icon(ROLE_ICONS[key] || 'briefcase')}<span style="flex:1">${esc(r?.name || key)}</span><span class="role-dot" data-role="${esc(key)}"></span></a>`;
     }).join('')}` : '';
 
   document.getElementById('app').innerHTML = `
@@ -115,7 +115,7 @@ function renderShell() {
           <div class="brand-name">EcomHub OS<small>${esc(state.settings.company_name || 'Ecometrix Hub')}</small></div>
         </div>
         <nav class="nav">
-          ${nav.map((n) => `${n.route === 'my-tasks' && state.isAdmin ? '<div class="nav-title">My work</div>' : ''}<a href="#/${n.route}" data-route="${n.route}">${icon(n.icon)}<span>${n.label}</span></a>`).join('')}
+          ${nav.filter((n) => !n.hidden).map((n) => `${n.route === 'my-tasks' && state.isAdmin ? '<div class="nav-title">My work</div>' : ''}<a href="#/${n.route}" data-route="${n.route}" title="${n.label}">${icon(n.icon)}<span>${n.label}</span></a>`).join('')}
           ${roleLinks}
         </nav>
         <div class="sidebar-foot">
@@ -129,10 +129,14 @@ function renderShell() {
       <div class="main">
         <header class="topbar">
           <button class="btn btn-ghost btn-icon menu-btn" id="menu" aria-label="Open menu">${icon('menu', 18)}</button>
+          <button class="btn btn-ghost btn-icon collapse-btn" id="collapse" aria-label="Collapse sidebar" title="Collapse sidebar">${icon('sidebar', 18)}</button>
           <div class="page-title" id="page-title"></div>
           <div class="spacer"></div>
           <div id="timer-slot"></div>
           <div id="bell-slot"></div>
+          <div class="pmenu-wrap">
+            <button class="pmenu-btn" id="pmenu" aria-haspopup="true" aria-expanded="false" aria-label="Your account">${avatar(p)}</button>
+          </div>
         </header>
         <main class="content" id="content"></main>
       </div>
@@ -144,6 +148,45 @@ function renderShell() {
     if (shell.classList.contains('nav-open') && (e.target.closest('.nav a') || e.target === shell)) shell.classList.remove('nav-open');
   });
   document.getElementById('signout').onclick = signOut;
+
+  // Collapse / expand the sidebar (desktop), remembered per browser
+  const setCollapsed = (on) => {
+    shell.classList.toggle('collapsed', on);
+    const b = document.getElementById('collapse');
+    b.setAttribute('aria-label', on ? 'Expand sidebar' : 'Collapse sidebar'); b.title = b.getAttribute('aria-label');
+    try { localStorage.setItem('ehos.sidebar', on ? 'collapsed' : 'open'); } catch { /* ignore */ }
+  };
+  let startCollapsed = false;
+  try { startCollapsed = localStorage.getItem('ehos.sidebar') === 'collapsed'; } catch { /* ignore */ }
+  setCollapsed(startCollapsed);
+  document.getElementById('collapse').onclick = () => setCollapsed(!shell.classList.contains('collapsed'));
+
+  // Account menu (top right)
+  const pbtn = document.getElementById('pmenu');
+  let pmenu = null;
+  const closeMenu = () => { pmenu?.remove(); pmenu = null; pbtn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', outsideMenu, true); };
+  const outsideMenu = (e) => { if (pmenu && !pmenu.contains(e.target) && !pbtn.contains(e.target)) closeMenu(); };
+  pbtn.onclick = () => {
+    if (pmenu) return closeMenu();
+    pmenu = document.createElement('div');
+    pmenu.className = 'pmenu';
+    pmenu.setAttribute('role', 'menu');
+    pmenu.innerHTML = `
+      <div class="pmenu-head">${avatar(p, 'lg')}<div style="min-width:0"><div class="name">${esc(fullName(p))}</div><div class="sub">${esc(p.email)}</div>
+        <div class="sub">${state.isOwner ? 'Admin' : state.isAdmin ? 'Manager' : esc(p.job_title || 'Team member')}</div></div></div>
+      <a role="menuitem" href="#/profile">${icon('user', 16)}Edit profile</a>
+      ${state.isOwner ? `<a role="menuitem" href="#/settings">${icon('settings', 16)}Settings</a><a role="menuitem" href="#/permissions">${icon('shield', 16)}Permissions</a>` : `<a role="menuitem" href="#/profile">${icon('settings', 16)}Settings &amp; password</a>`}
+      ${state.isOwner ? '' : `<a role="menuitem" href="#/my-activity">${icon('activity', 16)}My activity</a>`}
+      <div class="pmenu-sep"></div>
+      <button role="menuitem" class="danger" data-signout>${icon('logout', 16)}Sign out</button>`;
+    document.body.append(pmenu);
+    pbtn.setAttribute('aria-expanded', 'true');
+    pmenu.querySelectorAll('a').forEach((a) => a.addEventListener('click', closeMenu));
+    pmenu.querySelector('[data-signout]').onclick = () => { closeMenu(); signOut(); };
+    setTimeout(() => document.addEventListener('click', outsideMenu, true), 0);
+  };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && pmenu) closeMenu(); });
+
   import('./notify.js').then((m) => m.mountBell(document.getElementById('bell-slot')));
   mountTimerPill(document.getElementById('timer-slot'), async (taskId) => {
     const { openTaskDrawer } = await import('./task-drawer.js');
@@ -154,7 +197,7 @@ function renderShell() {
 async function signOut() {
   signingOut = true;
   const btn = document.getElementById('signout');
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   await endTracking();
   await supabase.auth.signOut();
   location.replace('/login.html?msg=signedout');
