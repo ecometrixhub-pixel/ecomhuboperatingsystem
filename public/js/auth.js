@@ -47,16 +47,8 @@ if (page === 'login') {
   setToggle();
   toggle.onclick = () => { pw.type = pw.type === 'password' ? 'text' : 'password'; setToggle(); pw.focus(); };
 
-  const swap = (toReset) => {
-    hideMsg();
-    $('view-login').classList.toggle('hidden', toReset);
-    $('login-form').classList.toggle('hidden', toReset);
-    $('view-reset').classList.toggle('hidden', !toReset);
-    $('reset-form').classList.toggle('hidden', !toReset);
-    if (toReset) { $('reset-email').value = $('email').value; $('reset-email').focus(); } else $('email').focus();
-  };
-  $('to-reset').onclick = () => swap(true);
-  $('to-login').onclick = () => swap(false);
+  // Passwords are reset by the admin (Team → member → Password reset link), not by email
+  $('to-reset').onclick = () => show('ok', 'Forgot your password? Ask your admin for a new password link. They can send it to you on WhatsApp.');
 
   $('login-form').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -80,17 +72,6 @@ if (page === 'login') {
     });
   });
 
-  $('reset-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    hideMsg();
-    const email = $('reset-email').value.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return show('error', 'Enter a valid email address.');
-    withButton(e.target.querySelector('[type=submit]'), 'Sending…', async () => {
-      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${location.origin}/set-password.html` });
-      if (error) return show('error', /rate limit/i.test(error.message) ? 'Too many emails sent. Ask your admin for a reset link instead.' : error.message);
-      show('ok', 'If that email belongs to a team member, a reset link is on its way. No email? Ask your admin for a reset link.');
-    });
-  });
 }
 
 // ---------------- Set password (invite or reset link) ----------------
@@ -107,7 +88,7 @@ if (page === 'set-password') {
 
   const expired = (msg) => {
     $('sp-sub').textContent = '';
-    show('error', msg && !/expired|invalid/i.test(msg) ? msg : 'This link has expired or was already used. Ask your admin for a new link (Team → your name → Password reset link).');
+    show('error', msg && !/expired|invalid/i.test(msg) ? msg : 'This link has expired or was already used. Ask your admin for a new link.');
     if (!document.getElementById('to-signin')) $('msg').insertAdjacentHTML('afterend', '<a class="btn btn-block" id="to-signin" href="/login.html">Go to sign in</a>');
   };
   const showForm = (email) => {

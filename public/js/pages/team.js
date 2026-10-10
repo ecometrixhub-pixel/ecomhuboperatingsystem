@@ -60,7 +60,7 @@ export async function render({ el, params }) {
     if (!list.length) { table.innerHTML = emptyState('No one matches these filters'); return; }
     table.innerHTML = `
       <table class="table">
-        <thead><tr><th>Member</th><th>Roles</th><th>Status</th><th>Presence</th><th>Employee ID</th><th>Joined</th></tr></thead>
+        <thead><tr><th>Member</th><th>Roles</th><th>Status</th><th>Presence</th><th>Employee ID</th><th>Joined</th><th class="r">Login link</th></tr></thead>
         <tbody>${list.map((m) => {
           const p = presence.get(m.id);
           const pr = p?.presence || 'offline';
@@ -71,6 +71,7 @@ export async function render({ el, params }) {
             <td>${m.status === 'invited' ? '<span class="muted small">Not joined yet</span>' : presenceTag(pr, pr === 'offline' ? (p?.last_seen_at ? `Seen ${fmtRelative(p.last_seen_at)}` : 'Offline') : null)}</td>
             <td class="num muted">${esc(m.employee_code)}</td>
             <td class="muted">${esc(fmtDate(m.joined_on))}</td>
+            <td class="r">${['inactive', 'suspended'].includes(m.status) ? '' : `<button class="btn btn-sm" data-regen="${m.id}" title="Make a new ${m.status === 'invited' ? 'invite' : 'password'} link">${icon('refresh', 13)}Regenerate</button>`}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>`;
@@ -94,7 +95,8 @@ export async function render({ el, params }) {
   el.querySelector('#add').onclick = () => memberForm();
   const offs = [
     on(table, 'click', '[data-add]', () => memberForm()),
-    on(table, 'click', 'tr[data-id]', (e, tr) => memberDrawer(tr.dataset.id)),
+    on(table, 'click', 'tr[data-id]', (e, tr) => { if (!e.target.closest('[data-regen]')) memberDrawer(tr.dataset.id); }),
+    on(table, 'click', '[data-regen]', (e, b) => { e.stopPropagation(); const m = members.find((x) => x.id === b.dataset.regen); if (m) regenLink(m, b); }),
     on(table, 'keydown', 'tr[data-id]', (e, tr) => { if (e.key === 'Enter') memberDrawer(tr.dataset.id); }),
   ];
 
@@ -220,7 +222,7 @@ export async function render({ el, params }) {
           ? `Send this link to ${esc(name)}. It opens a page where they set a password, then they're in. The link works once.`
           : `Send this link to ${esc(name)}. It lets them choose a new password. The link works once.`}</p>
         <div class="link-box"><input class="input" readonly value="${esc(link)}" aria-label="Link"><button class="btn" data-copy>${icon('copy', 14)}Copy</button></div>
-        <p class="small muted">If it expires before they use it, open their profile and get a new one.</p>`,
+        <p class="small muted">If it expires or doesn't work, press Regenerate link again. Only the newest link matters.</p>`,
       foot: `<a class="btn" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">${icon('send', 14)}Share on WhatsApp</a><button class="btn btn-primary" data-done>Done</button>`,
     });
     modal.querySelector('[data-copy]').onclick = async (e) => {
@@ -228,6 +230,16 @@ export async function render({ el, params }) {
     };
     modal.querySelector('[data-done]').onclick = () => modal.close();
     modal.querySelector('input').select();
+  }
+
+  // New one-time link: invite (not joined yet) or password reset (joined). Any older link stops mattering.
+  function regenLink(m, btn) {
+    return busy(btn, async () => {
+      try {
+        const res = await api(`/members/${m.id}/access-link`, { method: 'POST' });
+        showLink({ name: m.first_name || fullName(m), link: res.link, type: res.type });
+      } catch (err) { toast(err.message, 'error'); }
+    });
   }
 
   // ---------- Member drawer ----------
@@ -264,8 +276,8 @@ export async function render({ el, params }) {
           </div></div>
         ${!isOff ? `<div><div class="section-title">Access</div>
           <p class="small muted" style="margin-bottom:10px">${m.status === 'invited' ? 'They haven\'t set a password yet. Send a fresh invite link if the first one expired.' : 'If they forgot their password, send them a reset link.'}</p>
-          <button class="btn btn-sm" data-link>${icon('link', 14)}${m.status === 'invited' ? 'Get new invite link' : 'Get password reset link'}</button></div>` : ''}`,
-      foot: `<button class="btn ${isOff ? '' : 'btn-danger'}" data-status>${icon('power', 14)}${isOff ? 'Activate' : m.status === 'invited' ? 'Cancel invite' : 'Deactivate'}</button><span style="flex:1"></span><button class="btn" data-edit>${icon('edit', 14)}Edit</button><a class="btn btn-primary" href="#/tasks?new=1&member=${id}">${icon('plus', 14)}Assign task</a>`,
+          <button class="btn btn-sm" data-link>${icon('refresh', 14)}Regenerate ${m.status === 'invited' ? 'invite' : 'password'} link</button></div>` : ''}`,
+      foot: `<button class="btn ${isOff ? '' : 'btn-danger'}" data-status>${icon('power', 14)}${isOff ? 'Activate' : m.status === 'invited' ? 'Cancel invite' : 'Deactivate'}</button><span style="flex:1"></span>${isOff ? '' : `<button class="btn" data-link>${icon('refresh', 14)}Regenerate link</button>`}<button class="btn" data-edit>${icon('edit', 14)}Edit</button><a class="btn btn-primary" href="#/tasks?new=1&member=${id}">${icon('plus', 14)}Assign task</a>`,
     });
 
     // weekly numbers
@@ -300,12 +312,7 @@ export async function render({ el, params }) {
     }
 
     drawer.querySelector('[data-edit]').onclick = () => memberForm(m);
-    drawer.querySelector('[data-link]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
-      try {
-        const res = await api(`/members/${id}/access-link`, { method: 'POST' });
-        showLink({ name: m.first_name || fullName(m), link: res.link, type: res.type });
-      } catch (err) { toast(err.message, 'error'); }
-    }));
+    drawer.querySelectorAll('[data-link]').forEach((b) => { b.onclick = () => regenLink(m, b); });
     drawer.querySelector('[data-status]').onclick = async (e) => {
       const btn = e.currentTarget;
       const next = isOff ? 'active' : 'inactive';

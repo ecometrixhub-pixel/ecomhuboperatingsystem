@@ -36,11 +36,6 @@
           <h2>Sign in</h2>
           <p class="sub">Use the email your admin invited.</p>
         </div>
-        <div id="view-reset" class="hidden">
-          <h2>Reset your password</h2>
-          <p class="sub">We'll email you a link to set a new password.</p>
-        </div>
-
         <div id="msg" class="hidden"></div>
 
         <form id="login-form" novalidate>
@@ -56,15 +51,6 @@
             </div>
           </div>
           <button class="btn btn-primary btn-lg btn-block" type="submit">Sign in</button>
-        </form>
-
-        <form id="reset-form" class="hidden" novalidate>
-          <div class="field">
-            <label for="reset-email">Email</label>
-            <input id="reset-email" class="input" type="email" autocomplete="email" required>
-          </div>
-          <button class="btn btn-primary btn-lg btn-block" type="submit">Send reset link</button>
-          <button type="button" class="linkish" id="to-login">Back to sign in</button>
         </form>
 
         <p class="auth-foot" id="tracking-note"></p>

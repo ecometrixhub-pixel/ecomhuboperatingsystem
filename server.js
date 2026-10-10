@@ -98,16 +98,22 @@ async function logEvent(actor, action, subject, description, meta = {}) {
   });
 }
 
+// The link we share points to our own page with the token hash. The token is only used when the person
+// presses "Continue" there, so WhatsApp / email link previews (which open links on their own) can't use it up.
+function shareLink(redirectTo, props, type) {
+  return `${redirectTo}?token_hash=${encodeURIComponent(props.hashed_token)}&type=${encodeURIComponent(props.verification_type || type)}`;
+}
+
 // Generates a one-time link the admin can share (WhatsApp, email, Slack).
 // Invite link for people who haven't joined yet; password-reset link for everyone else.
 async function accessLink(email, invited, redirectTo, data) {
   if (invited) {
     const r = await db.auth.admin.generateLink({ type: 'invite', email, options: { redirectTo, data } });
-    if (!r.error) return { link: r.data.properties.action_link, type: 'invite', user: r.data.user };
+    if (!r.error) return { link: shareLink(redirectTo, r.data.properties, 'invite'), type: 'invite', user: r.data.user };
   }
   const r = await db.auth.admin.generateLink({ type: 'recovery', email, options: { redirectTo } });
   if (r.error) throw new HttpError(400, r.error.message);
-  return { link: r.data.properties.action_link, type: 'recovery', user: r.data.user };
+  return { link: shareLink(redirectTo, r.data.properties, 'recovery'), type: 'recovery', user: r.data.user };
 }
 
 // ---------- auth middleware ----------
@@ -167,7 +173,7 @@ api.post('/members', requireAdmin, wrap(async (req, res) => {
     throw new HttpError(400, error.message);
   }
   await logEvent(req.admin, 'member_invited', user.id, `Invited ${fields.first_name} ${fields.last_name || ''}`.trim(), { email, roles });
-  res.status(201).json({ id: user.id, inviteLink: invite.data.properties.action_link });
+  res.status(201).json({ id: user.id, inviteLink: shareLink(redirectTo, invite.data.properties, 'invite') });
 }));
 
 // Create (or update) the co-founders' accounts in one go → invite links to share
@@ -197,7 +203,7 @@ api.post('/setup/founders', requireAdmin, wrap(async (req, res) => {
       const { error } = await db.rpc('admin_save_member', { p_actor: req.admin.id, p_member: user.id, p_fields: fields, p_roles: ['manager'] });
       if (error) { await db.auth.admin.deleteUser(user.id).catch(() => {}); throw new Error(error.message); }
       await logEvent(req.admin, 'member_invited', user.id, `Invited ${name} (co-founder)`, { email: f.email, roles: ['manager'] });
-      results.push({ name, email: f.email, status: 'created', link: invite.data.properties.action_link });
+      results.push({ name, email: f.email, status: 'created', link: shareLink(redirectTo, invite.data.properties, 'invite') });
     } catch (e) {
       results.push({ name, email: f.email, status: 'error', error: e.message });
     }
