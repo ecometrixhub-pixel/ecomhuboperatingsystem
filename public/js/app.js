@@ -200,6 +200,12 @@ function renderShell() {
   });
 }
 
+// Clicking anywhere on a date field opens the calendar
+document.addEventListener('click', (e) => {
+  const i = e.target.closest?.('input[type="date"]');
+  if (i && !i.disabled && !i.readOnly && typeof i.showPicker === 'function') { try { i.showPicker(); } catch { /* not allowed here */ } }
+});
+
 async function signOut() {
   signingOut = true;
   const btn = document.getElementById('signout');

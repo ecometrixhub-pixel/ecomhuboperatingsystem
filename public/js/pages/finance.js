@@ -13,7 +13,7 @@ export const CATS = {
   utilities: 'Internet & utilities', equipment: 'Equipment', travel: 'Travel & meals', taxes: 'Taxes & fees', other: 'Other',
 };
 const CAT_COLOR = { tools: '#4F46E5', salary: '#0EA5E9', rent: '#F59E0B', ads: '#DB2777', freelancers: '#8B5CF6', utilities: '#14B8A6', equipment: '#64748B', travel: '#F97316', taxes: '#DC2626', other: '#94A3B8' };
-const FREQ = { weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Every 3 months', yearly: 'Yearly' };
+const FREQ = { once: 'One time', weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Every 3 months', yearly: 'Yearly' };
 const KIND = { capital: 'Capital', loan: 'Loan', grant: 'Grant', other: 'Other' };
 const TABS = [['overview', 'Dashboard', 'dashboard'], ['expenses', 'Expenses', 'wallet'], ['recurring', 'Bills & salaries', 'calendar'], ['investments', 'Investments', 'trending'], ['invoices', 'Invoices', 'file'], ['report', 'Monthly report', 'chart']];
 const changed = () => window.dispatchEvent(new CustomEvent('ehos:data-changed'));
@@ -22,6 +22,13 @@ const salaryOk = () => state.isAdmin;
 const monthLabel = (ym) => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${ym}-01T00:00:00Z`));
 const shortMonth = (ym) => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(`${ym}-01T00:00:00Z`));
 const shiftMonth = (ym, n) => { const d = new Date(`${ym}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + n); return d.toISOString().slice(0, 7); };
+function addFreq(d, f) {
+  const [y, m, day] = d.split('-').map(Number);
+  if (f === 'weekly') { const x = new Date(Date.UTC(y, m - 1, day + 7)); return x.toISOString().slice(0, 10); }
+  const months = f === 'quarterly' ? 3 : f === 'yearly' ? 12 : 1;
+  const last = new Date(Date.UTC(y, m - 1 + months + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m - 1 + months, Math.min(day, last))).toISOString().slice(0, 10);
+}
 const pct = (a, b) => (Number(b) ? Math.round(((a - b) / Math.abs(b)) * 100) : null);
 const delta = (a, b, goodUp = true) => { const p = pct(a, b); if (p === null) return ''; const good = goodUp ? p >= 0 : p <= 0; return `<span class="delta ${good ? 'up' : 'down'}">${p >= 0 ? '+' : ''}${p}%</span>`; };
 
@@ -143,7 +150,7 @@ export async function render({ el, params }) {
   // ---------- Bills & salaries ----------
   async function recurring() {
     const rows = await q(supabase.from('recurring_expenses').select('*').order('active', { ascending: false }).order('next_due'));
-    const perMonth = (r) => (r.frequency === 'weekly' ? r.amount * 52 / 12 : r.frequency === 'quarterly' ? r.amount / 3 : r.frequency === 'yearly' ? r.amount / 12 : Number(r.amount));
+    const perMonth = (r) => (r.frequency === 'once' ? 0 : r.frequency === 'weekly' ? r.amount * 52 / 12 : r.frequency === 'quarterly' ? r.amount / 3 : r.frequency === 'yearly' ? r.amount / 12 : Number(r.amount));
     const groups = [
       ['Tools & subscriptions', rows.filter((r) => r.category === 'tools')],
       salaryOk() && ['Salaries', rows.filter((r) => r.category === 'salary')],
@@ -152,19 +159,23 @@ export async function render({ el, params }) {
     const row = (r) => {
       const d = daysBetween(todayStr(), r.next_due);
       const name = r.category === 'salary' ? (dirName(dir, r.payee_member) || r.title) : r.title;
-      return `<div class="list-item bill ${r.active ? '' : 'off'}" style="flex-wrap:wrap">
+      const once = r.frequency === 'once';
+      const left = d > 0 ? `${d} day${d === 1 ? '' : 's'} left` : d === 0 ? 'today' : `${-d} day${d === -1 ? '' : 's'} overdue`;
+      const when = once
+        ? (r.active ? `<span class="due ${d < 0 ? 'over' : d <= r.remind_days ? 'soon' : ''}">Due ${esc(fmtDate(r.next_due))} · ${left}</span>` : `<span>Paid ${esc(fmtDate(r.next_due))}</span>`)
+        : r.active ? `<span class="due ${d < 0 ? 'over' : d <= r.remind_days ? 'soon' : ''}">Renews ${esc(fmtDate(r.next_due))} · ${left}</span>` : '';
+      return `<div class="list-item bill ${r.active || once ? '' : 'off'}" style="flex-wrap:wrap">
         <span class="cat-dot" style="background:${CAT_COLOR[r.category] || '#94A3B8'}"></span>
-        <div class="grow" style="min-width:180px"><div class="title">${esc(name)}${r.active ? '' : ' <span class="badge paused">Paused</span>'}</div>
-          <div class="meta"><span>${fmtPaid(r, money)} ${esc(FREQ[r.frequency].toLowerCase())}</span>${r.vendor ? `<span>${esc(r.vendor)}</span>` : ''}
-            ${r.active ? (d < 0 ? `<span class="due over">Overdue since ${esc(fmtDate(r.next_due))}</span>` : `<span class="due ${d <= r.remind_days ? 'soon' : ''}">Next ${esc(fmtDate(r.next_due))}</span>`) : ''}
-            <span>${r.auto_post ? 'Charged automatically' : `Reminder ${r.remind_days} day${r.remind_days === 1 ? '' : 's'} before`}</span></div></div>
-        ${edit && r.active ? `<button class="btn btn-sm" data-pay="${r.id}">${icon('check', 13)}${r.category === 'salary' ? 'Mark paid' : 'Paid'}</button><button class="btn btn-sm btn-ghost" data-skip="${r.id}" title="Skip this one">Skip</button>` : ''}
+        <div class="grow" style="min-width:180px"><div class="title">${esc(name)}${r.active ? '' : once ? ' <span class="badge paid">Paid</span>' : ' <span class="badge paused">Paused</span>'}</div>
+          <div class="meta"><span>${fmtPaid(r, money)} ${esc(FREQ[r.frequency].toLowerCase())}</span>${r.vendor ? `<span>${esc(r.vendor)}</span>` : ''}${when}
+            ${r.active ? `<span>${r.auto_post ? 'Charged automatically' : `Reminder ${r.remind_days} day${r.remind_days === 1 ? '' : 's'} before`}</span>` : ''}</div></div>
+        ${edit && r.active ? `<button class="btn btn-sm" data-pay="${r.id}">${icon('check', 13)}${r.category === 'salary' ? 'Mark paid' : 'Paid'}</button>${once ? '' : `<button class="btn btn-sm btn-ghost" data-skip="${r.id}" title="Skip this one">Skip</button>`}` : ''}
         ${edit ? `<button class="btn btn-sm btn-ghost btn-icon" data-edit-bill="${r.id}" aria-label="Edit">${icon('edit', 13)}</button>` : ''}
         ${del ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-bill="${r.id}" aria-label="Delete">${icon('trash', 13)}</button>` : ''}
       </div>`;
     };
     body.innerHTML = `
-      <div class="note info" style="margin-bottom:14px">${icon('bell', 13)} Reminders go to the admin and all managers (co-founders)${salaryOk() ? '. Salary reminders go only to them' : ''}; tool and other bill reminders also go to the Finance team. Bills set to <b>charge automatically</b> are added as an expense on the due date. The rest wait for <b>Mark paid</b>.</div>
+      <div class="note info" style="margin-bottom:14px">${icon('bell', 13)} Reminders go to the admin and all managers (co-founders)${salaryOk() ? '. Salary reminders go only to them' : ''}; tool and other bill reminders also go to the Finance team. Bills set to <b>charge automatically</b> are added as an expense on the renewal date. The rest wait for <b>Mark paid</b>.</div>
       ${groups.map(([title, list]) => `
         <section class="panel" style="margin-bottom:16px"><div class="panel-head"><div><h2>${title}</h2><p>${list.filter((r) => r.active).length} active · ${money(list.filter((r) => r.active).reduce((a, r) => a + perMonth(r), 0))} a month</p></div>
           ${edit ? `<button class="btn btn-sm" data-add="${title === 'Salaries' ? 'salary' : title.startsWith('Tools') ? 'bill' : 'other-bill'}">${icon('plus', 13)}Add</button>` : ''}</div>
@@ -331,7 +342,7 @@ export async function render({ el, params }) {
       body: `<form id="xf" class="form-grid" novalidate>
         <div class="field span-2"><label for="xf-title">What was it for?</label><input id="xf-title" class="input" maxlength="200" value="${esc(e0.title)}" placeholder="e.g. Canva Pro, office rent, Fiverr designer"></div>
         <div class="field"><label for="xf-cat">Category</label><select id="xf-cat" class="select">${Object.entries(CATS).filter(([k]) => k !== 'salary' || salaryOk()).map(([k, v]) => `<option value="${k}" ${e0.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-        <div class="field"><label for="xf-date">Date</label><input id="xf-date" class="input" type="date" value="${esc(e0.spent_on)}"></div>
+        <div class="field"><label for="xf-date">Paid on</label><input id="xf-date" class="input" type="date" value="${esc(e0.spent_on)}"></div>
         ${moneyFieldsHTML({ id: 'xf', currency: x?.currency, amount: x ? (x.amount_original ?? x.amount) : '', rate: x?.fx_rate })}
         <div class="field"><label for="xf-vendor">Paid to (vendor)</label><input id="xf-vendor" class="input" maxlength="120" value="${esc(e0.vendor || '')}" placeholder="Canva, landlord, Upwork…"></div>
         <div class="field xf-salary ${e0.category === 'salary' ? '' : 'hidden'}"><label for="xf-payee">Salary for</label><select id="xf-payee" class="select"><option value="">Choose a member</option>${membersOptions(e0.payee_member)}</select></div>
@@ -361,22 +372,29 @@ export async function render({ el, params }) {
     });
   }
 
-  function billForm({ bill = null, kind = 'tools' } = {}) {
+  async function billForm({ bill = null, kind = 'tools' } = {}) {
     const b0 = bill || { title: '', category: kind === 'salary' ? 'salary' : kind === 'other' ? 'rent' : 'tools', amount: '', frequency: 'monthly', next_due: todayStr(), vendor: '', payee_member: '', auto_post: kind === 'tools', remind_days: 3, active: true, notes: '' };
     const isSal = b0.category === 'salary';
+    // When was it last paid? (new: today; edit: the latest payment recorded for this bill)
+    let lastPaid = null;
+    if (bill) lastPaid = (await q(supabase.from('expenses').select('spent_on').eq('recurring_id', bill.id).order('spent_on', { ascending: false }).limit(1)).catch(() => []))[0]?.spent_on || null;
+    const startUnpaid = bill ? (bill.frequency === 'once' ? bill.active : !lastPaid) : false;
+    const startDate = bill ? (startUnpaid ? bill.next_due : (bill.frequency === 'once' ? bill.next_due : lastPaid)) : todayStr();
     const m = openModal({
-      title: bill ? 'Edit' : isSal ? 'Add a monthly salary' : 'Add a recurring bill', icon: 'calendar', wide: true,
+      title: bill ? 'Edit' : isSal ? 'Add a salary' : 'Add a bill', icon: 'calendar', wide: true,
       body: `<form id="bf" class="form-grid" novalidate>
         ${isSal ? `<div class="field span-2"><label for="bf-payee">Team member</label><select id="bf-payee" class="select"><option value="">Choose a member</option>${membersOptions(b0.payee_member)}</select></div>`
           : `<div class="field"><label for="bf-title">Name</label><input id="bf-title" class="input" maxlength="200" value="${esc(b0.title)}" placeholder="e.g. Canva Pro, Shopify, ChatGPT, office rent"></div>
              <div class="field"><label for="bf-cat">Category</label><select id="bf-cat" class="select">${Object.entries(CATS).filter(([k]) => k !== 'salary').map(([k, v]) => `<option value="${k}" ${b0.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`}
         ${moneyFieldsHTML({ id: 'bf', label: isSal ? 'Salary' : 'Amount', currency: bill?.currency, amount: bill ? (bill.amount_original ?? bill.amount) : '', rate: bill?.fx_rate })}
         <div class="field"><label for="bf-freq">How often</label><select id="bf-freq" class="select">${Object.entries(FREQ).map(([k, v]) => `<option value="${k}" ${b0.frequency === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-        <div class="field"><label for="bf-due">${isSal ? 'Next payday' : 'Next due date'}</label><input id="bf-due" class="input" type="date" value="${esc(b0.next_due)}"></div>
+        <div class="field"><label for="bf-date" id="bf-date-label">${startUnpaid ? 'Due on' : 'Paid on'}</label><input id="bf-date" class="input" type="date" value="${esc(startDate || '')}"></div>
+        <label class="check span-2"><input type="checkbox" id="bf-unpaid" ${startUnpaid ? 'checked' : ''}> <span>Not paid yet. Pick the date it's due instead.</span></label>
+        <div class="renew-box span-2" id="bf-renew" aria-live="polite"></div>
         <div class="field"><label for="bf-remind">Remind me</label><select id="bf-remind" class="select">${[0, 1, 2, 3, 5, 7, 14].map((d) => `<option value="${d}" ${Number(b0.remind_days) === d ? 'selected' : ''}>${d ? `${d} day${d === 1 ? '' : 's'} before` : 'On the day'}</option>`).join('')}</select></div>
-        ${isSal ? '' : `<div class="field"><label for="bf-vendor">Vendor</label><input id="bf-vendor" class="input" maxlength="120" value="${esc(b0.vendor || '')}" placeholder="Canva, Meta, landlord…"></div>`}
-        <label class="check span-2"><input type="checkbox" id="bf-auto" ${b0.auto_post ? 'checked' : ''}> <span><b>Charged automatically</b> (card subscription). It's added as an expense on the due date. Leave off to get a reminder and press Mark paid yourself.</span></label>
-        ${bill ? `<label class="check span-2"><input type="checkbox" id="bf-active" ${b0.active ? 'checked' : ''}> <span><b>Active</b>. Turn off to pause reminders and charges.</span></label>` : ''}
+        ${isSal ? '<div></div>' : `<div class="field"><label for="bf-vendor">Vendor</label><input id="bf-vendor" class="input" maxlength="120" value="${esc(b0.vendor || '')}" placeholder="Canva, Meta, landlord…"></div>`}
+        <label class="check span-2"><input type="checkbox" id="bf-auto" ${b0.auto_post ? 'checked' : ''}> <span><b>Charged automatically</b> (card subscription). It's added as an expense on the renewal date. Leave off to get a reminder and press Mark paid yourself.</span></label>
+        ${bill && bill.frequency !== 'once' ? `<label class="check span-2"><input type="checkbox" id="bf-active" ${b0.active ? 'checked' : ''}> <span><b>Active</b>. Turn off to pause reminders and charges.</span></label>` : ''}
         <div class="field span-2"><label for="bf-notes">Notes</label><textarea id="bf-notes" class="textarea" rows="2">${esc(b0.notes || '')}</textarea></div>
         <div class="form-error hidden span-2" id="bf-err"></div></form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${bill ? 'Save' : 'Add'}</button>`,
@@ -384,22 +402,64 @@ export async function render({ el, params }) {
     m.querySelector('[data-cancel]').onclick = () => m.close();
     const bm = bindMoneyFields(m, { id: 'bf', money });
     const err = m.querySelector('#bf-err');
+    const freq = m.querySelector('#bf-freq'); const date = m.querySelector('#bf-date'); const unpaid = m.querySelector('#bf-unpaid'); const box = m.querySelector('#bf-renew');
+    let touched = !bill;
+    // next due date from what's in the form (null = no renewal)
+    const plan = () => {
+      const d = date.value; const f = freq.value;
+      if (!d) return null;
+      if (unpaid.checked) return { next: d, paid: null };
+      return { next: f === 'once' ? d : addFreq(d, f), paid: d };
+    };
+    const drawRenew = () => {
+      m.querySelector('#bf-date-label').textContent = unpaid.checked ? 'Due on' : 'Paid on';
+      const pl = plan();
+      if (!pl) { box.innerHTML = `<span class="muted">Pick the ${unpaid.checked ? 'due' : 'paid'} date.</span>`; return; }
+      const left = daysBetween(todayStr(), pl.next);
+      const leftTxt = left > 0 ? `<b>${left}</b> day${left === 1 ? '' : 's'} left` : left === 0 ? '<b>Today</b>' : `<b class="neg">${-left}</b> day${left === -1 ? '' : 's'} overdue`;
+      if (freq.value === 'once') {
+        box.innerHTML = unpaid.checked
+          ? `${icon('calendar', 15)}<div><span class="lbl">One-time payment, due on</span><b>${esc(fmtDate(pl.next))}</b></div><div class="left ${left < 0 ? 'over' : left <= 3 ? 'soon' : ''}">${leftTxt}</div>`
+          : `${icon('check', 15)}<div><span class="lbl">One-time payment, paid on</span><b>${esc(fmtDate(pl.paid))}</b></div><div class="left">No renewal</div>`;
+      } else {
+        box.innerHTML = `${icon('refresh', 15)}<div><span class="lbl">${unpaid.checked ? 'First payment due on' : `Paid ${esc(fmtDate(pl.paid))} · renews on`}</span><b>${esc(fmtDate(pl.next))}</b></div>
+          <div class="left ${left < 0 ? 'over' : left <= 3 ? 'soon' : ''}">${leftTxt}</div>`;
+      }
+    };
+    [freq, date, unpaid].forEach((x) => x.addEventListener('change', () => { touched = true; drawRenew(); }));
+    date.addEventListener('input', () => { touched = true; drawRenew(); });
+    drawRenew();
+
     m.querySelector('[data-save]').onclick = (ev) => busy(ev.currentTarget, async () => {
       const v = (s) => m.querySelector(s)?.value.trim() ?? '';
       const fail = (t) => { err.textContent = t; err.classList.remove('hidden'); };
       const payee = isSal ? v('#bf-payee') : null;
       const mv = bm.read();
+      const pl = plan();
       const p = { title: isSal ? `Salary – ${dirName(dir, payee)}` : v('#bf-title'), category: isSal ? 'salary' : v('#bf-cat'), currency: mv.currency, amount_original: mv.amount_original, fx_rate: mv.fx_rate, amount: mv.amount,
-        frequency: v('#bf-freq'), next_due: v('#bf-due'), remind_days: Number(v('#bf-remind')), vendor: isSal ? null : (v('#bf-vendor') || null),
+        frequency: freq.value, remind_days: Number(v('#bf-remind')), vendor: isSal ? null : (v('#bf-vendor') || null),
         payee_member: payee || null, auto_post: m.querySelector('#bf-auto').checked, notes: v('#bf-notes') };
-      if (bill) p.active = m.querySelector('#bf-active').checked;
       if (isSal && !payee) return fail('Choose the team member.');
       if (!isSal && !p.title) return fail('Give the bill a name.');
       if (mv.error) return fail(mv.error);
-      if (!p.next_due) return fail('Pick the next due date.');
+      if (!pl) return fail(unpaid.checked ? 'Pick the date it\'s due.' : 'Pick the date it was paid.');
+      if (pl.paid && pl.paid > todayStr()) return fail('The paid date is in the future. Tick "Not paid yet" for a payment that\'s coming up.');
+      if (touched) p.next_due = pl.next;
+      const closedOnce = freq.value === 'once' && !unpaid.checked;
+      if (closedOnce) p.active = false;
+      else if (bill && m.querySelector('#bf-active')) p.active = m.querySelector('#bf-active').checked;
+      else if (!bill || bill.frequency === 'once') p.active = true;
       try {
-        if (bill) await q(supabase.from('recurring_expenses').update(p).eq('id', bill.id)); else await q(supabase.from('recurring_expenses').insert(p));
-        toast(bill ? 'Saved' : 'Added. Reminders are on.'); m.close(); changed();
+        let id = bill?.id;
+        if (bill) await q(supabase.from('recurring_expenses').update(p).eq('id', bill.id));
+        else id = (await q(supabase.from('recurring_expenses').insert(p).select('id').single())).id;
+        // A new bill that's already paid: record that payment as an expense on the paid date
+        if (!bill && pl.paid) {
+          await q(supabase.from('expenses').insert({ title: p.title, category: p.category, currency: p.currency, amount_original: p.amount_original, fx_rate: p.fx_rate, amount: p.amount,
+            spent_on: pl.paid, vendor: p.vendor, payee_member: p.payee_member, recurring_id: id, period: pl.paid, notes: freq.value === 'once' ? 'One-time payment' : `Paid ${pl.paid}, renews ${pl.next}` }));
+        }
+        toast(bill ? 'Saved' : pl.paid ? (freq.value === 'once' ? 'One-time payment recorded' : `Payment recorded. Renews on ${fmtDate(pl.next)}`) : 'Added. Reminders are on.');
+        m.close(); changed();
         rpc('finance_sweep').catch(() => {});
       } catch (e) { fail(e.message); }
     });
@@ -415,7 +475,7 @@ export async function render({ el, params }) {
         <div class="field"><label for="pf-date">Paid on</label><input id="pf-date" class="input" type="date" value="${esc(todayStr())}"></div>
         ${cur !== base ? `<div class="field span-2"><label for="pf-rate">Exchange rate</label><div class="fx-line"><span>1 <b>${esc(cur)}</b> =</span><input id="pf-rate" class="input" type="number" min="0" step="any" value="${esc(r.fx_rate || '')}" style="max-width:160px"><span>${esc(base)}</span><span class="fx-eq" id="pf-eq"></span></div>
           <span class="hint" id="pf-hint">Last rate used for this bill. Change it to the rate you actually paid.</span></div>` : ''}
-        <p class="small muted span-2">This records an expense for the payment due ${esc(fmtDate(r.next_due))}, and the next one moves to the following ${r.frequency === 'monthly' ? 'month' : 'period'}.</p></form>`,
+        <p class="small muted span-2">This records an expense for the payment due ${esc(fmtDate(r.next_due))}, ${r.frequency === 'once' ? 'and the bill is closed (one-time).' : `and it renews on ${esc(fmtDate(addFreq(r.next_due, r.frequency)))}.`}</p></form>`,
       foot: '<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>Mark paid</button>',
     });
     const amt = m.querySelector('#pf-amount'); const rate = m.querySelector('#pf-rate');

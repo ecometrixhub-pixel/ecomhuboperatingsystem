@@ -558,5 +558,19 @@ await as(MG, async () => {
   ok(Number(inv.amount) === 270, 'AED investment converted');
 });
 
+console.log('Part 9: one-time bills');
+await as(MG, async () => {
+  const [b] = await q(`insert into recurring_expenses (title, category, amount, frequency, next_due, auto_post) values ('Logo pack', 'tools', 49, 'once', current_date, true) returning id`);
+  await q(`select finance_sweep()`);
+  const [r] = await q(`select active, next_due = current_date as same from recurring_expenses where id=$1`, [b.id]);
+  ok(!r.active && r.same, 'one-time bill charged once, then closed');
+  ok((await q(`select count(*)::int c from expenses where recurring_id=$1`, [b.id]))[0].c === 1, 'one expense recorded for the one-time bill');
+  const [b2] = await q(`insert into recurring_expenses (title, category, amount, frequency, next_due) values ('Domain', 'tools', 15, 'once', current_date + 10) returning id`);
+  await q(`select recurring_mark_paid($1)`, [b2.id]);
+  ok(!(await q(`select active from recurring_expenses where id=$1`, [b2.id]))[0].active, 'paying a one-time bill closes it');
+  const o = (await q(`select finance_overview() o`))[0].o;
+  ok(o.monthly_fixed !== undefined, 'overview still works with one-time bills');
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -909,3 +909,11 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .fx-line .input { flex: 1 1 120px; }
 .fx-eq { font-weight: 600; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .fx-row { background: var(--section); border-radius: 10px; padding: 10px 12px; }
+.renew-box { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--accent-soft); background: var(--accent-bg); border-radius: 10px; color: var(--accent-ink); font-size: 13px; }
+.renew-box > div:first-of-type { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.renew-box .lbl { font-size: 12px; color: var(--muted); }
+.renew-box b { font-size: 15px; color: var(--ink); }
+.renew-box .left { font-size: 13px; color: var(--ink-2); text-align: right; white-space: nowrap; }
+.renew-box .left b { font-size: 16px; }
+.renew-box .left.soon b { color: #B45309; } .renew-box .left.over b, .renew-box b.neg { color: var(--error); }
+input[type="date"] { cursor: pointer; }

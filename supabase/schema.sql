@@ -3012,4 +3012,84 @@ revoke execute on all functions in schema public from public, anon;
 revoke execute on function public.money_before_write(), public.recurring_post(bigint, numeric, date) from authenticated;
 grant execute on function public.recurring_mark_paid(bigint, numeric, date, numeric) to authenticated;
 
+
+
+-- =====================================================================
+--  PART 9 — One-time bills; paying a one-time bill closes it
+-- =====================================================================
+alter table public.recurring_expenses drop constraint if exists recurring_expenses_frequency_check;
+alter table public.recurring_expenses add constraint recurring_expenses_frequency_check
+  check (frequency in ('once', 'weekly', 'monthly', 'quarterly', 'yearly'));
+
+create or replace function public.advance_due(p_date date, p_freq text) returns date
+language sql immutable as $$
+  select case p_freq when 'once' then p_date
+                     when 'weekly' then p_date + 7
+                     when 'quarterly' then (p_date + interval '3 months')::date
+                     when 'yearly' then (p_date + interval '1 year')::date
+                     else (p_date + interval '1 month')::date end;
+$$;
+
+create or replace function public.recurring_post(p_id bigint, p_amount numeric, p_paid_on date) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare r recurring_expenses%rowtype; v_id bigint;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  insert into expenses (title, category, currency, amount_original, fx_rate, amount, spent_on, vendor, payee_member, recurring_id, period, notes)
+  values (r.title, r.category, r.currency, coalesce(p_amount, r.amount_original, r.amount), r.fx_rate,
+          round(coalesce(p_amount, r.amount_original, r.amount) * coalesce(r.fx_rate, 1), 2),
+          coalesce(p_paid_on, r.next_due), r.vendor, r.payee_member, r.id, r.next_due,
+          case r.frequency when 'once' then 'One-time payment' when 'monthly' then 'For ' || to_char(r.next_due, 'Mon YYYY') else 'Due ' || to_char(r.next_due, 'DD Mon YYYY') end)
+  on conflict (recurring_id, period) where recurring_id is not null do nothing
+  returning id into v_id;
+  if r.frequency = 'once' then
+    update recurring_expenses set active = false where id = p_id;
+  else
+    update recurring_expenses set next_due = advance_due(r.next_due, r.frequency) where id = p_id;
+  end if;
+  return v_id;
+end $$;
+
+create or replace function public.finance_overview() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_today date := (now() at time zone app_tz())::date; v_m date; v_sal boolean := is_manager(); r jsonb;
+        v_inv numeric; v_rev numeric; v_exp numeric; v_burn numeric;
+begin
+  if not perm('finance', 'view') then raise exception 'You don''t have access to finance'; end if;
+  v_m := date_trunc('month', v_today)::date;
+  select coalesce(sum(amount), 0) into v_inv from investments;
+  select coalesce(sum(amount), 0) into v_rev from invoices where status = 'paid';
+  select coalesce(sum(amount), 0) into v_exp from expenses;
+  select coalesce(sum(amount), 0) / 3 into v_burn from expenses where spent_on >= (v_m - interval '3 months')::date and spent_on < v_m;
+  select jsonb_build_object(
+    'currency', (select currency from app_settings where id = 1),
+    'month', to_char(v_m, 'YYYY-MM'),
+    'revenue_month', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= v_m), 0),
+    'expenses_month', coalesce((select sum(amount) from expenses where spent_on >= v_m), 0),
+    'revenue_last', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= (v_m - interval '1 month')::date and paid_date < v_m), 0),
+    'expenses_last', coalesce((select sum(amount) from expenses where spent_on >= (v_m - interval '1 month')::date and spent_on < v_m), 0),
+    'invested_total', v_inv, 'revenue_total', v_rev, 'expenses_total', v_exp, 'cash', v_inv + v_rev - v_exp,
+    'burn', round(v_burn, 2), 'runway_months', case when v_burn > 0 then round((v_inv + v_rev - v_exp) / v_burn, 1) end,
+    'outstanding', coalesce((select sum(amount) from invoices where status = 'sent'), 0),
+    'monthly_fixed', coalesce((select sum(case frequency when 'weekly' then amount * 52 / 12 when 'quarterly' then amount / 3 when 'yearly' then amount / 12 when 'once' then 0 else amount end)
+                                 from recurring_expenses where active), 0),
+    'salaries_monthly', case when v_sal then coalesce((select sum(case frequency when 'weekly' then amount * 52 / 12 when 'quarterly' then amount / 3 when 'yearly' then amount / 12 when 'once' then 0 else amount end)
+                                 from recurring_expenses where active and category = 'salary'), 0) end,
+    'months', (select coalesce(jsonb_agg(jsonb_build_object('month', to_char(m, 'YYYY-MM'),
+                 'revenue', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= m and paid_date < m + interval '1 month'), 0),
+                 'expenses', coalesce((select sum(amount) from expenses where spent_on >= m and spent_on < m + interval '1 month'), 0)) order by m), '[]'::jsonb)
+               from generate_series(v_m - interval '11 months', v_m, interval '1 month') m),
+    'by_category', (select coalesce(jsonb_agg(jsonb_build_object('category', category, 'total', t) order by t desc), '[]'::jsonb)
+               from (select category, sum(amount) t from expenses where spent_on >= v_m group by category) x),
+    'upcoming', (select coalesce(jsonb_agg(jsonb_build_object('id', id, 'title', case when category = 'salary' then 'Salary: ' || coalesce(member_name(payee_member), title) else title end,
+                 'category', category, 'amount', amount, 'next_due', next_due, 'auto_post', auto_post) order by next_due), '[]'::jsonb)
+               from recurring_expenses where active and next_due <= v_today + 30 and (category <> 'salary' or v_sal))
+  ) into r;
+  return r;
+end $$;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.recurring_post(bigint, numeric, date) from authenticated;
+grant execute on function public.advance_due(date, text), public.finance_overview() to authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).
