@@ -240,10 +240,13 @@ export async function openLeadDrawer(id) {
       try {
         if (b.dataset.act === 'edit') return openLeadForm(lead);
         if (b.dataset.act === 'convert') {
-          const ok = await confirmDialog({ title: `Convert ${lead.company} to a client?`, text: 'A client is created with these details. The admin and managers get notified to assign a project manager.', confirm: 'Convert to client' });
+          const ok = await confirmDialog({ title: `Convert ${lead.company} to a client?`, text: 'A client is created with these details. Next, create a project for it and assign a project manager. The admin and managers get notified.', confirm: 'Convert to client' });
           if (!ok) return;
-          await rpc('lead_convert', { p_lead: id });
+          const cid = await rpc('lead_convert', { p_lead: id });
           toast('Converted to client');
+          if (can('projects', 'edit') && await confirmDialog({ title: 'Create a project now?', text: `Start a project for ${lead.company} and pick its project manager.`, confirm: 'Create project' })) {
+            const pm = await import('./projects.js'); pm.openProjectForm({ clientId: cid });
+          }
           changed();
         }
         if (b.dataset.act === 'delete') {

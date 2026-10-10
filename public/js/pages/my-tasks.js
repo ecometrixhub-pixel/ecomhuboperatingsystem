@@ -111,10 +111,10 @@ export async function render({ el, arg: role, setTitle }) {
         rp.querySelector('[data-import]')?.addEventListener('click', () => m.openImport());
         rp.querySelector('[data-share]')?.addEventListener('click', () => m.shareForm());
         rp.querySelectorAll('[data-lead]').forEach((x) => x.onclick = () => m.openLeadDrawer(Number(x.dataset.lead)));
-      } else if (role === 'project_manager' && canAny('clients')) {
-        const m = await import('./clients.js');
-        rp.innerHTML = await m.clientsPanel();
-        rp.querySelectorAll('[data-client]').forEach((x) => x.onclick = () => m.openClientDrawer(Number(x.dataset.client)));
+      } else if (role === 'project_manager' && canAny('projects')) {
+        const m = await import('./projects.js');
+        rp.innerHTML = await m.projectsPanel();
+        rp.querySelectorAll('[data-project]').forEach((x) => x.onclick = () => m.openProjectDrawer(Number(x.dataset.project)));
       } else if (role === 'finance' && can('finance')) {
         const b = await import('../business.js');
         rp.innerHTML = `<div class="role-panel">${b.businessPanel(await b.loadBusiness(), { compact: true })}<p style="margin-top:10px"><a class="btn btn-sm" href="#/finance">Open finance</a></p></div>`;

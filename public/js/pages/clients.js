@@ -17,26 +17,23 @@ const isPM = (c) => c.project_manager === state.profile.id;
 const canEditClient = (c) => can('clients', 'edit') || (isPM(c) && state.pmPerms.clients?.edit);
 const canDeleteClient = (c) => can('clients', 'delete') || (isPM(c) && state.pmPerms.clients?.delete);
 const canInv = (c, a) => can('finance', a) || (isPM(c) && state.pmPerms.finance?.[a]);
-export const AGENT_ROLES = ['Designer', 'Web Developer', 'Social Media Manager', 'Ads Specialist', 'Video Editor', 'Content Writer', 'SEO Specialist', 'Other'];
-const canManageTeam = (c) => state.isAdmin || isPM(c);
 const canFiles = (c, a) => (a === 'view' ? true : a === 'edit' ? canEditClient(c) : canDeleteClient(c));
 
 export async function render({ el, params }) {
-  let clients = []; let invoices = []; let dir = [];
+  let clients = []; let invoices = []; let dir = []; let projects = [];
   let status = params.get('status') || 'all';
-  let pmFilter = ''; let search = '';
+  let search = '';
   const showMoney = canAny('finance');
   const onlyMine = !can('clients');
 
   el.innerHTML = `
     <div class="page-head">
-      <div><h1>${onlyMine ? 'My clients' : 'Clients'}</h1><p>${onlyMine ? 'Clients you manage or work on.' : 'Won deals with their onboarding, contracts, invoices and revenue.'}</p></div>
+      <div><h1>${onlyMine ? 'My clients' : 'Clients'}</h1><p>${onlyMine ? 'Clients of the projects you run or work on.' : 'Won deals with their onboarding, projects, contracts, invoices and revenue.'}</p></div>
       <div class="actions">${can('clients', 'edit') ? `<button class="btn btn-primary" id="new">${icon('plus', 15)}New client</button>` : ''}</div>
     </div>
     <div class="toolbar"><div class="seg" role="group" aria-label="Status" id="status"></div></div>
     <div class="toolbar">
       <div class="search grow">${icon('search', 15)}<input class="input" id="q" placeholder="Search clients" aria-label="Search clients"></div>
-      ${onlyMine ? '' : '<select class="select" id="pm" style="width:auto" aria-label="Project manager"><option value="">Any project manager</option><option value="none">No project manager</option></select>'}
     </div>
     <section class="panel"><div class="table-wrap" id="table">${loadingBlock(5)}</div></section>`;
   const table = el.querySelector('#table');
@@ -51,41 +48,36 @@ export async function render({ el, params }) {
       `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${k === 'all' ? clients.length : clients.filter((c) => c.status === k).length}</span></button>`).join('');
     const s = search.toLowerCase();
     const list = clients.filter((c) => (status === 'all' || c.status === status)
-      && (!pmFilter || (pmFilter === 'none' ? !c.project_manager : c.project_manager === pmFilter))
       && (!s || `${c.name} ${c.contact_name || ''} ${c.email || ''}`.toLowerCase().includes(s)));
     if (!clients.length) {
-      table.innerHTML = emptyState(onlyMine ? 'No clients assigned to you yet' : 'No clients yet', onlyMine ? 'When the admin assigns you a client, it shows up here.' : 'Mark a lead as won, or add a client directly.', can('clients', 'edit') ? '<button class="btn btn-primary" data-new>New client</button>' : '');
+      table.innerHTML = emptyState(onlyMine ? 'No clients assigned to you yet' : 'No clients yet', onlyMine ? 'When you run or join a project, its client shows up here.' : 'Mark a lead as won, or add a client directly.', can('clients', 'edit') ? '<button class="btn btn-primary" data-new>New client</button>' : '');
       return;
     }
     if (!list.length) { table.innerHTML = emptyState('No clients match these filters'); return; }
     table.innerHTML = `<table class="table">
-      <thead><tr><th>Client</th><th>Status</th><th>Onboarded</th><th>Project manager</th><th class="r">Retainer / mo</th>${showMoney ? '<th class="r">Revenue</th><th class="r">Unpaid</th>' : ''}</tr></thead>
+      <thead><tr><th>Client</th><th>Status</th><th>Onboarded</th><th>Projects</th><th class="r">Retainer / mo</th>${showMoney ? '<th class="r">Revenue</th><th class="r">Unpaid</th>' : ''}</tr></thead>
       <tbody>${list.map((c) => { const m = sums(c.id); return `<tr class="clickable" data-id="${c.id}" tabindex="0">
         <td><div style="font-weight:500">${esc(c.name)}</div><div class="small muted">${esc([c.contact_name, c.country].filter(Boolean).join(', ') || '—')}</div></td>
         <td>${clientBadge(c.status)}</td>
         <td class="small">${esc(fmtDate(c.onboarding_date))}</td>
-        <td class="small">${esc(dirName(dir, c.project_manager) || '—')}</td>
+        <td class="small">${(() => { const ps = projects.filter((x) => x.client_id === c.id); return ps.length ? `${ps.length} ${ps.length === 1 ? 'project' : 'projects'}<div class="muted">${esc([...new Set(ps.map((x) => dirName(dir, x.project_manager)).filter(Boolean))].join(', ') || 'No PM yet')}</div>` : '<span class="muted">No project yet</span>'; })()}</td>
         <td class="r money">${c.monthly_retainer ? money(c.monthly_retainer) : '<span class="muted">—</span>'}</td>
         ${showMoney ? `<td class="r money pos">${money(m.paid)}</td><td class="r money" style="${m.overdue ? 'color:var(--error);font-weight:600' : ''}">${m.due ? money(m.due) : '<span class="muted">—</span>'}</td>` : ''}
       </tr>`; }).join('')}</tbody></table>`;
   }
 
   async function load() {
-    [clients, invoices, dir] = await Promise.all([
+    [clients, invoices, dir, projects] = await Promise.all([
       q(supabase.from('clients').select('*').order('created_at', { ascending: false })),
       showMoney ? q(supabase.from('invoices').select('id, client_id, amount, status, due_date')) : Promise.resolve([]),
       loadDirectory(),
+      q(supabase.from('projects').select('id, client_id, project_manager, status')).catch(() => []),
     ]);
-    const sel = el.querySelector('#pm');
-    if (sel && sel.options.length <= 2) {
-      sel.insertAdjacentHTML('beforeend', dir.filter((d) => d.roles.includes('project_manager')).map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join(''));
-    }
     draw();
   }
 
   el.querySelector('#status').addEventListener('click', (e) => { const b = e.target.closest('[data-s]'); if (b) { status = b.dataset.s; draw(); } });
   el.querySelector('#q').addEventListener('input', (e) => { search = e.target.value.trim(); draw(); });
-  el.querySelector('#pm')?.addEventListener('change', (e) => { pmFilter = e.target.value; draw(); });
   el.querySelector('#new')?.addEventListener('click', () => openClientForm());
   const offs = [
     on(table, 'click', '[data-new]', () => openClientForm()),
@@ -101,10 +93,7 @@ export async function render({ el, params }) {
 
 // ---------- Client form ----------
 export async function openClientForm(client = null) {
-  const dir = await loadDirectory();
-  const pms = dir.filter((d) => d.roles.includes('project_manager') && d.status === 'active');
   const c = client || { name: '', contact_name: '', email: '', phone: '', website: '', country: '', services: '', onboarding_date: todayStr(), status: 'onboarding', monthly_retainer: '', project_manager: '', notes: '' };
-  const canPM = can('clients', 'edit');
   const m = openModal({
     title: client ? 'Edit client' : 'New client',
     wide: true,
@@ -119,9 +108,6 @@ export async function openClientForm(client = null) {
         <div class="field"><label for="cf-date">Onboarding date</label><input id="cf-date" class="input" type="date" value="${esc(c.onboarding_date || '')}"></div>
         <div class="field"><label for="cf-status">Status</label><select id="cf-status" class="select">${Object.entries(CLIENT_STATUS).map(([k, v]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
         <div class="field"><label for="cf-ret">Monthly retainer (${esc(state.settings.currency || 'USD')})</label><input id="cf-ret" class="input" type="number" min="0" step="1" value="${esc(c.monthly_retainer ?? '')}"></div>
-        <div class="field span-2"><label for="cf-pm">Project manager</label>
-          <select id="cf-pm" class="select" ${canPM ? '' : 'disabled'}><option value="">Not assigned</option>${pms.map((p) => `<option value="${p.id}" ${c.project_manager === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-          <span class="hint">${pms.length ? 'They see this client (and only their assigned clients) in their account.' : 'Give someone the Project Manager role on the Team page first.'}</span></div>
         <div class="field span-2"><label for="cf-services">Services</label><input id="cf-services" class="input" maxlength="300" value="${esc(c.services || '')}" placeholder="Meta ads, Google ads, CRO…"></div>
         <div class="field span-2"><label for="cf-notes">Notes</label><textarea id="cf-notes" class="textarea">${esc(c.notes || '')}</textarea></div>
         <div class="form-error hidden span-2" id="cf-err"></div>
@@ -138,12 +124,18 @@ export async function openClientForm(client = null) {
       website: v('#cf-web') || null, country: v('#cf-country') || null, onboarding_date: v('#cf-date') || null, status: v('#cf-status'),
       monthly_retainer: v('#cf-ret') === '' ? null : Number(v('#cf-ret')), services: v('#cf-services') || null, notes: v('#cf-notes'),
     };
-    if (canPM) payload.project_manager = v('#cf-pm') || null;
     if (!payload.name) { err.textContent = 'Enter the client name.'; err.classList.remove('hidden'); return; }
     try {
       if (client) await q(supabase.from('clients').update(payload).eq('id', client.id));
-      else await q(supabase.from('clients').insert(payload));
-      toast(client ? 'Client saved' : 'Client added'); m.close(); changed();
+      else {
+        const row = await q(supabase.from('clients').insert(payload).select('id').single());
+        toast('Client added'); m.close(); changed();
+        if (can('projects', 'edit') && await confirmDialog({ title: 'Create a project for this client?', text: 'A project gets a project manager and a team.', confirm: 'Create project' })) {
+          (await import('./projects.js')).openProjectForm({ clientId: row.id });
+        }
+        return;
+      }
+      toast('Client saved'); m.close(); changed();
     } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
   });
   save.onclick = submit;
@@ -151,9 +143,10 @@ export async function openClientForm(client = null) {
 }
 
 // ---------- Invoice form ----------
-export async function openInvoiceForm({ clientId = null, invoice = null } = {}) {
+export async function openInvoiceForm({ clientId = null, projectId = null, invoice = null } = {}) {
   const clients = clientId ? [] : await q(supabase.from('clients').select('id, name').order('name'));
-  const i = invoice || { invoice_number: '', description: '', amount: '', issue_date: todayStr(), due_date: '', status: 'sent' };
+  const projects = clientId && !projectId ? await q(supabase.from('projects').select('id, name').eq('client_id', clientId).order('name')).catch(() => []) : [];
+  const i = invoice || { invoice_number: '', description: '', amount: '', issue_date: todayStr(), due_date: '', status: 'sent', project_id: projectId };
   const m = openModal({
     title: invoice ? 'Edit invoice' : 'New invoice',
     body: `
@@ -164,6 +157,8 @@ export async function openInvoiceForm({ clientId = null, invoice = null } = {}) 
         <div class="field"><label for="in-issue">Issue date</label><input id="in-issue" class="input" type="date" value="${esc(i.issue_date || '')}"></div>
         <div class="field"><label for="in-due">Due date</label><input id="in-due" class="input" type="date" value="${esc(i.due_date || '')}"></div>
         <div class="field span-2"><label for="in-status">Status</label><select id="in-status" class="select">${Object.entries(INVOICE_STATUS).map(([k, v]) => `<option value="${k}" ${i.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        ${projects.length ? `<div class="field span-2"><label for="in-project">Project</label><select id="in-project" class="select"><option value="">Whole client (no project)</option>${projects.map((p) => `<option value="${p.id}" ${i.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+          <span class="hint">The project manager of that project can see this invoice.</span></div>` : ''}
         <div class="field span-2"><label for="in-desc">Description</label><input id="in-desc" class="input" maxlength="300" value="${esc(i.description || '')}" placeholder="October retainer, Meta ads management"></div>
         <div class="form-error hidden span-2" id="in-err"></div>
       </form>`,
@@ -179,6 +174,8 @@ export async function openInvoiceForm({ clientId = null, invoice = null } = {}) 
       due_date: v('#in-due') || null, status: v('#in-status'), description: v('#in-desc') || '',
     };
     const cid = clientId || Number(v('#in-client'));
+    if (projectId) payload.project_id = projectId;
+    else if (m.querySelector('#in-project')) payload.project_id = Number(v('#in-project')) || null;
     if (!cid) { err.textContent = 'Choose a client.'; err.classList.remove('hidden'); return; }
     if (!(payload.amount >= 0) || v('#in-amount') === '') { err.textContent = 'Enter the amount.'; err.classList.remove('hidden'); return; }
     try {
@@ -202,17 +199,19 @@ export function openClientDrawer(id, tab = 'overview') {
     if (!drawer.isConnected) return;
     if (!c) { drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This client was deleted or isn\'t assigned to you.</p>'; return; }
     const showInv = canInv(c, 'view');
-    const [invoices, files, team, ctasks] = await Promise.all([
+    const [invoices, files, projects, ctasks] = await Promise.all([
       showInv ? q(supabase.from('invoices').select('*').eq('client_id', id).order('issue_date', { ascending: false })) : Promise.resolve([]),
       q(supabase.from('client_files').select('*').eq('client_id', id).order('created_at', { ascending: false })),
-      q(supabase.from('client_members').select('*').eq('client_id', id).order('created_at')),
+      q(supabase.from('projects').select('*').eq('client_id', id).order('created_at', { ascending: false })).catch(() => []),
       q(supabase.from('tasks').select('id, title, status, priority, due_date, assigned_to').eq('client_id', id).order('created_at', { ascending: false })),
     ]);
     if (!drawer.isConnected) return;
     drawer.querySelector('.drawer-head h2').textContent = c.name;
     const paid = invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + Number(i.amount), 0);
     const due = invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + Number(i.amount), 0);
-    const tabs = [['overview', 'Overview'], ['team', `Team${team.length ? ` (${team.length})` : ''}`], ['tasks', `Tasks${ctasks.length ? ` (${ctasks.length})` : ''}`],
+    const projName = (pid) => projects.find((x) => x.id === pid)?.name || '';
+    const { projectBadge } = await import('./projects.js');
+    const tabs = [['overview', 'Overview'], ['projects', `Projects${projects.length ? ` (${projects.length})` : ''}`], ['tasks', `Tasks${ctasks.length ? ` (${ctasks.length})` : ''}`],
       showInv && ['invoices', `Invoices${invoices.length ? ` (${invoices.length})` : ''}`], ['files', `Files${files.length ? ` (${files.length})` : ''}`]].filter(Boolean);
     if (!tabs.some(([k]) => k === tab)) tab = 'overview';
 
@@ -226,7 +225,7 @@ export function openClientDrawer(id, tab = 'overview') {
           <div class="stat"><div class="v" style="font-size:19px">${invoices.length}</div><div class="k">Invoices</div></div></div></div>` : ''}
         <dl class="kv">
           <dt>Onboarding date</dt><dd>${esc(fmtDate(c.onboarding_date))}</dd>
-          <dt>Project manager</dt><dd>${esc(dirName(dir, c.project_manager) || 'Not assigned')}</dd>
+          <dt>Projects</dt><dd>${projects.length ? projects.map((x) => `${esc(x.name)} <span class="muted small">(${esc(dirName(dir, x.project_manager) || 'no PM yet')})</span>`).join('<br>') : 'None yet'}</dd>
           <dt>Contact</dt><dd>${esc(c.contact_name || '—')}</dd>
           <dt>Email</dt><dd>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '—'}</dd>
           <dt>Phone</dt><dd>${esc(c.phone || '—')}</dd>
@@ -236,43 +235,28 @@ export function openClientDrawer(id, tab = 'overview') {
           <dt>Client since</dt><dd>${esc(fmtDateOfIso(c.created_at))}${c.lead_id ? ' (from a won lead)' : ''}</dd>
         </dl>
         <div><div class="section-title">Notes</div>${c.notes ? `<div class="desc">${esc(c.notes)}</div>` : '<p class="muted small">No notes.</p>'}</div>`;
-    } else if (tab === 'team') {
-      const taken = new Set(team.map((t) => t.member_id));
-      const options = dir.filter((d) => d.status === 'active' && !taken.has(d.id) && d.id !== c.project_manager);
+    } else if (tab === 'projects') {
       content = `
-        <div class="note info">The project manager runs this client. Agents (designer, developer, social media manager…) work with them and get tasks for this client.</div>
-        <div><div class="section-title">Project manager</div>
-          <div class="list-item panel" style="padding:10px 14px">${c.project_manager ? `<span class="mini-av">${esc((dirName(dir, c.project_manager) || '?')[0])}</span><div class="grow"><div class="title">${esc(dirName(dir, c.project_manager))}</div></div>` : '<div class="grow muted">Not assigned yet</div>'}
-          ${can('clients', 'edit') ? '<button class="btn btn-sm" data-act="edit">Change</button>' : ''}</div></div>
-        <div><div class="section-title">Agents</div>
-          ${team.length ? `<div class="panel"><div class="list">${team.map((t) => `
-            <div class="list-item" style="padding:10px 14px"><span class="mini-av">${esc((dirName(dir, t.member_id) || '?')[0])}</span>
-              <div class="grow"><div class="title">${esc(dirName(dir, t.member_id) || 'Member')}</div><div class="meta">${esc(t.role_label)}</div></div>
-              ${canManageTeam(c) ? `<button class="btn btn-sm" data-assign="${t.member_id}">${icon('plus', 13)}Assign task</button><button class="btn btn-sm btn-ghost btn-icon btn-danger" data-remove="${t.member_id}" aria-label="Remove agent">${icon('x', 13)}</button>` : ''}
-            </div>`).join('')}</div></div>` : '<p class="muted small">No agents yet.</p>'}
-        </div>
-        ${canManageTeam(c) ? `<div class="panel"><div class="panel-body stack" style="gap:10px">
-          <div class="section-title" style="margin:0">Add an agent</div>
-          <div class="form-grid">
-            <div class="field"><label for="ag-member">Team member</label><select id="ag-member" class="select"><option value="">Choose a member</option>${options.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></div>
-            <div class="field"><label for="ag-role">Works as</label><select id="ag-role" class="select">${AGENT_ROLES.map((r) => `<option>${r}</option>`).join('')}</select>
-              <input id="ag-role-other" class="input hidden" style="margin-top:6px" maxlength="40" placeholder="Type the role"></div>
-          </div>
-          <div><button class="btn btn-primary btn-sm" data-add-agent>${icon('userPlus', 13)}Add agent</button></div></div></div>` : ''}`;
+        <div class="note info">Each project has its own project manager and team. The project manager sees only their project: its tasks, files and invoices.</div>
+        <div class="section-title">Projects for this client <span>${can('projects', 'edit') ? `<button class="btn btn-sm btn-primary" data-new-project>${icon('plus', 13)}Create project</button>` : ''}</span></div>
+        ${projects.length ? `<div class="panel"><div class="list">${projects.map((x) => `
+          <a class="list-item" href="#/projects?open=${x.id}"><div class="grow"><div class="title">${esc(x.name)}</div>
+            <div class="meta"><span>PM: ${esc(dirName(dir, x.project_manager) || 'not assigned')}</span>${x.due_date ? `<span>Due ${esc(fmtDate(x.due_date))}</span>` : ''}</div></div>${projectBadge(x.status)}</a>`).join('')}</div></div>`
+          : emptyState('No projects yet', can('projects', 'edit') ? 'Create a project, pick its project manager, then add the team.' : '')}`;
     } else if (tab === 'tasks') {
       content = `
-        <div class="section-title">Tasks for this client <span>${canManageTeam(c) ? `<button class="btn btn-sm btn-primary" data-assign="">${icon('plus', 13)}New task</button>` : ''}</span></div>
+        <div class="section-title">Tasks for this client <span>${state.isAdmin ? `<button class="btn btn-sm btn-primary" data-assign="">${icon('plus', 13)}New task</button>` : ''}</span></div>
         ${ctasks.length ? `<div class="panel"><div class="list">${ctasks.map((t) => `
           <div class="list-item clickable" data-task="${t.id}"><div class="grow"><div class="title">${esc(t.title)}</div>
             <div class="meta">${statusBadge(t.status)}${prioTag(t.priority)}<span>${esc(dirName(dir, t.assigned_to) || 'Unassigned')}</span>${t.due_date && t.status !== 'completed' ? `<span class="due ${dueState(t)}">${esc(dueLabel(t.due_date))}</span>` : ''}</div></div></div>`).join('')}</div></div>`
-          : emptyState('No tasks yet', canManageTeam(c) ? 'Add agents on the Team tab, then assign them work here.' : '')}`;
+          : emptyState('No tasks yet', 'Tasks made inside a project show up here too.')}`;
     } else if (tab === 'invoices') {
       content = `
         <div class="section-title">Invoices <span class="row">${canInv(c, 'edit') ? `<button class="btn btn-sm btn-primary" data-new-inv>${icon('plus', 13)}New invoice</button>` : ''}</span></div>
         ${invoices.length ? `<div class="panel"><div class="list">${invoices.map((i) => `
           <div class="list-item" style="padding:11px 14px">
             <div class="grow"><div class="title">${esc(i.invoice_number || `Invoice #${i.id}`)} <span class="money" style="font-weight:600;margin-left:6px">${money(i.amount)}</span></div>
-              <div class="meta"><span>Issued ${esc(fmtDate(i.issue_date))}</span>${i.due_date ? `<span>Due ${esc(fmtDate(i.due_date))}</span>` : ''}${i.paid_date ? `<span>Paid ${esc(fmtDate(i.paid_date))}</span>` : ''}${i.description ? `<span>${esc(i.description)}</span>` : ''}</div></div>
+              <div class="meta"><span>Issued ${esc(fmtDate(i.issue_date))}</span>${i.due_date ? `<span>Due ${esc(fmtDate(i.due_date))}</span>` : ''}${i.paid_date ? `<span>Paid ${esc(fmtDate(i.paid_date))}</span>` : ''}${i.description ? `<span>${esc(i.description)}</span>` : ''}${i.project_id ? `<span>${icon('folder', 11)} ${esc(projName(i.project_id))}</span>` : ''}</div></div>
             ${invoiceBadge(i)}
             ${canInv(c, 'edit') && i.status === 'sent' ? `<button class="btn btn-sm" data-paid="${i.id}">${icon('check', 13)}Mark paid</button>` : ''}
             ${canInv(c, 'edit') ? `<button class="btn btn-sm btn-ghost btn-icon" data-edit-inv="${i.id}" aria-label="Edit invoice">${icon('edit', 13)}</button>` : ''}
@@ -287,7 +271,7 @@ export function openClientDrawer(id, tab = 'overview') {
           <span class="hint small muted">PDF, Word, images, up to 25 MB. Only people who can see this client can open it.</span></div></div>` : ''}
         ${files.length ? `<div class="panel"><div>${files.map((f) => `
           <div class="file-row">${icon('file', 18)}<div class="grow"><div class="title">${esc(f.name)}</div>
-            <div class="small muted">${esc(FILE_KINDS[f.kind] || f.kind)}, ${f.size_bytes ? (f.size_bytes / 1048576).toFixed(1) + ' MB, ' : ''}${esc(dirName(dir, f.uploaded_by) || '')} ${esc(fmtDateOfIso(f.created_at))}</div></div>
+            <div class="small muted">${f.project_id ? `${icon('folder', 11)} ${esc(projName(f.project_id))}, ` : ''}${esc(FILE_KINDS[f.kind] || f.kind)}, ${f.size_bytes ? (f.size_bytes / 1048576).toFixed(1) + ' MB, ' : ''}${esc(dirName(dir, f.uploaded_by) || '')} ${esc(fmtDateOfIso(f.created_at))}</div></div>
             <button class="btn btn-sm" data-open-file="${esc(f.storage_path)}">${icon('download', 13)}Open</button>
             ${canFiles(c, 'delete') ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-file="${f.id}" aria-label="Delete file">${icon('trash', 13)}</button>` : ''}
           </div>`).join('')}</div></div>` : emptyState('No contracts or documents yet')}`;
@@ -298,7 +282,8 @@ export function openClientDrawer(id, tab = 'overview') {
     let foot = '';
     if (canDeleteClient(c)) foot += `<button class="btn btn-ghost btn-danger" data-act="delete">${icon('trash', 14)}Delete</button>`;
     foot += '<span style="flex:1"></span>';
-    if (canEditClient(c)) foot += `<button class="btn btn-primary" data-act="edit">${icon('edit', 14)}Edit client</button>`;
+    if (can('projects', 'edit')) foot += `<button class="btn" data-act="project">${icon('folder', 14)}Create project</button>`;
+    if (canEditClient(c) || (projects.some((x) => x.project_manager === state.profile.id) && state.pmPerms.clients?.edit)) foot += `<button class="btn btn-primary" data-act="edit">${icon('edit', 14)}Edit client</button>`;
     let footEl = drawer.querySelector('.drawer-foot');
     if (!footEl) { footEl = document.createElement('div'); footEl.className = 'drawer-foot'; drawer.append(footEl); }
     footEl.innerHTML = foot;
@@ -307,25 +292,10 @@ export function openClientDrawer(id, tab = 'overview') {
     body.querySelectorAll('[data-tab]').forEach((b) => b.onclick = () => { tab = b.dataset.tab; load(); });
     body.querySelector('[data-new-inv]')?.addEventListener('click', () => openInvoiceForm({ clientId: id }));
     body.querySelector('[data-act="edit"]')?.addEventListener('click', () => openClientForm(c));
-    const agRole = body.querySelector('#ag-role');
-    agRole?.addEventListener('change', () => body.querySelector('#ag-role-other').classList.toggle('hidden', agRole.value !== 'Other'));
-    body.querySelector('[data-add-agent]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
-      const member = body.querySelector('#ag-member').value;
-      const label = agRole.value === 'Other' ? body.querySelector('#ag-role-other').value.trim() : agRole.value;
-      if (!member) return toast('Choose a team member', 'error');
-      if (!label) return toast('Type the role', 'error');
-      try { await q(supabase.from('client_members').insert({ client_id: id, member_id: member, role_label: label })); toast('Agent added. They were notified.'); changed(); }
-      catch (err) { toast(err.message, 'error'); }
-    }));
-    body.querySelectorAll('[data-remove]').forEach((b) => b.onclick = async () => {
-      if (!await confirmDialog({ title: `Remove ${dirName(dir, b.dataset.remove)} from ${c.name}?`, text: 'Their existing tasks stay.', confirm: 'Remove agent', danger: true })) return;
-      try { await q(supabase.from('client_members').delete().eq('client_id', id).eq('member_id', b.dataset.remove)); toast('Agent removed'); changed(); } catch (err) { toast(err.message, 'error'); }
-    });
+    body.querySelector('[data-new-project]')?.addEventListener('click', async () => (await import('./projects.js')).openProjectForm({ clientId: id }));
     body.querySelectorAll('[data-assign]').forEach((b) => b.onclick = async () => {
       const { openTaskForm } = await import('../task-drawer.js');
-      const opts = team.map((t) => ({ id: t.member_id, first_name: `${dirName(dir, t.member_id)} (${t.role_label})`, last_name: '', roles: [], status: 'active' }));
-      if (state.isAdmin && c.project_manager && !team.some((t) => t.member_id === c.project_manager)) opts.unshift({ id: c.project_manager, first_name: `${dirName(dir, c.project_manager)} (project manager)`, last_name: '', roles: [], status: 'active' });
-      openTaskForm({ clientId: id, clientName: c.name, memberOptions: opts, presetMember: b.dataset.assign || null, onSaved: () => { tab = 'tasks'; changed(); } });
+      openTaskForm({ clientId: id, clientName: c.name, presetMember: b.dataset.assign || null, onSaved: () => { tab = 'tasks'; changed(); } });
     });
     body.querySelectorAll('[data-task]').forEach((x) => x.onclick = async () => { const { openTaskDrawer } = await import('../task-drawer.js'); openTaskDrawer(Number(x.dataset.task)); });
     body.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = () => openInvoiceForm({ clientId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }));
@@ -367,8 +337,9 @@ export function openClientDrawer(id, tab = 'overview') {
       }
     }));
     footEl.querySelector('[data-act="edit"]')?.addEventListener('click', () => openClientForm(c));
+    footEl.querySelector('[data-act="project"]')?.addEventListener('click', async () => (await import('./projects.js')).openProjectForm({ clientId: id }));
     footEl.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
-      if (!await confirmDialog({ title: `Delete ${c.name}?`, text: 'Its invoices and file records are deleted too. This can\'t be undone.', confirm: 'Delete client', danger: true })) return;
+      if (!await confirmDialog({ title: `Delete ${c.name}?`, text: 'Its projects, invoices and file records are deleted too. This can\'t be undone.', confirm: 'Delete client', danger: true })) return;
       try {
         const paths = files.map((f) => f.storage_path);
         if (paths.length) await supabase.storage.from('client-files').remove(paths); // while access checks still pass

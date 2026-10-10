@@ -10,10 +10,11 @@ export const state = {
   perms: {},        // { leads: {view, edit, delete}, clients: {...}, finance: {...} }
   pmPerms: {},      // what the Project Manager role allows on assigned clients
   permRows: [],     // raw role_permissions rows
+  projectOf: [],    // project ids the user is an approved member of
 };
 export const roleName = (key) => state.roles.find((r) => r.key === key)?.name || key;
 
-export const MODULES = ['leads', 'clients', 'finance'];
+export const MODULES = ['leads', 'clients', 'finance', 'projects'];
 
 export function computePerms() {
   const all = { view: true, edit: true, delete: true };

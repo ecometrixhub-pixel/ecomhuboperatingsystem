@@ -258,7 +258,7 @@ const FN = await mkUser('fn@ecom.com', ['finance']);
 const PM1 = await mkUser('pm1@ecom.com', ['project_manager']);
 const PM2 = await mkUser('pm2@ecom.com', ['project_manager']);
 const MG = await mkUser('mg@ecom.com', ['manager']);
-ok((await q(`select count(*)::int c from role_permissions`))[0].c === 18, 'default permissions seeded for 6 roles');
+ok((await q(`select count(*)::int c from role_permissions`))[0].c === 24, 'default permissions seeded for 6 roles × 4 modules');
 
 const [lead] = await as(LG, () => q(`insert into leads (company, contact_name, source, budget, currency) values ('GlowCo', 'Amy', 'Instagram', 1500, 'USD') returning id, created_by`));
 ok(lead.created_by === LG, 'lead generator adds a lead (created_by forced)');
@@ -313,7 +313,7 @@ await as(FN, async () => {
     `finance sees revenue: month=${b.revenue_month} outstanding=${b.outstanding} clients=${b.active_clients} won=${b.won_month}`);
   ok((await q(`select paid_date is not null as p from invoices where invoice_number='INV-001'`))[0].p, 'paid date set automatically');
 });
-await as(PM1, async () => ok((await q(`select count(*)::int c from invoices`))[0].c === 0, 'project manager cannot see invoices by default'));
+await as(PM1, async () => ok((await q(`select count(*)::int c from invoices where client_id <> $1`, [clientId]))[0].c === 0, 'project manager sees no invoices of other clients'));
 await as(SR, async () => {
   const r = await q(`update role_permissions set can_view=true where role_key='finance' and module='leads' returning role_key`);
   ok(r.length === 0, 'members cannot change permissions');
@@ -371,6 +371,88 @@ await as(SR, async () => {
 await q(`insert into leads (company, contact_name, agent_id, source) values ('Form Brand', 'Ali', $1, 'Website form')`, [LG]);
 ok((await notes(A)).includes('New lead from the form: Form Brand') && (await notes(LG)).includes('Lead submitted for you: Form Brand'), 'public form lead notifies managers + the agent');
 await as(PM2, () => q(`select count(*)::int c from notifications`).then((r) => ok(true, 'notifications are private (PM2 sees ' + r[0].c + ')')));
+
+console.log('Part 4: projects, team approvals');
+const [nova] = await as(A, () => q(`insert into clients (name) values ('Nova Store') returning id`));
+await expectErr(() => as(SR, () => q(`insert into projects (client_id, name) values ($1, 'x')`, [nova.id])), 'sales rep cannot create projects', /row-level/);
+const [pj] = await as(MG, () => q(`insert into projects (client_id, name, project_manager) values ($1, 'Nova Shopify build', $2) returning id, created_by`, [nova.id, PM2]));
+ok(pj.created_by === MG, 'manager creates a project for a client');
+await expectErr(() => as(MG, () => q(`insert into projects (client_id, name, project_manager) values ($1, 'x', $2)`, [nova.id, SR])), 'only Project Manager role can run a project', /Project Manager/);
+ok((await notes(PM2)).includes('Project assigned to you: Nova Shopify build'), 'project manager notified when assigned a project');
+await as(PM2, async () => {
+  ok((await q(`select count(*)::int c from projects`))[0].c === 1, 'PM sees their project');
+  ok((await q(`select count(*)::int c from clients where id=$1`, [nova.id]))[0].c === 1, 'PM sees the client of their project');
+  await expectErr(() => q(`update projects set project_manager=$1 where id=$2`, [PM1, pj.id]), 'PM cannot hand the project to someone else', /admin or a manager|row-level/);
+  const r = await q(`update projects set status='active' where id=$1 returning status`, [pj.id]);
+  ok(r[0]?.status === 'active', 'PM can update their project status');
+});
+ok((await notes(MG)).includes('Project active: Nova Shopify build'), 'managers notified when the PM changes project status');
+await as(PM1, async () => ok((await q(`select count(*)::int c from projects where id=$1`, [pj.id]))[0].c === 0, 'other PM cannot see the project'));
+
+// Manager adds → project manager approves
+const reqLG = await as(MG, async () => (await q(`select project_member_request($1, $2, 'Designer') as id`, [pj.id, LG]))[0].id);
+let [pm1row] = await q(`select status, approver from project_members where id=$1`, [reqLG]);
+ok(pm1row.status === 'pending' && pm1row.approver === 'pm', 'manager request waits for the project manager');
+ok((await notes(PM2)).some((t) => t.startsWith('Approval needed: add') && t.endsWith('Nova Shopify build')), 'project manager gets the approval request');
+await expectErr(() => as(MG, () => q(`select project_member_request($1, $2, 'Designer')`, [pj.id, LG])), 'duplicate request blocked', /already waiting/);
+await expectErr(() => as(A, () => q(`select project_member_decide($1, true)`, [reqLG])), 'admin cannot approve a request meant for the PM', /project manager/);
+await as(LG, async () => ok((await q(`select count(*)::int c from projects where id=$1`, [pj.id]))[0].c === 0, 'pending member cannot see the project yet'));
+await as(PM2, () => q(`select project_member_decide($1, true, 'Welcome')`, [reqLG]));
+[pm1row] = await q(`select status, decided_by, decided_at from project_members where id=$1`, [reqLG]);
+ok(pm1row.status === 'approved' && pm1row.decided_by === PM2 && pm1row.decided_at, 'approval saved with who and when');
+await expectErr(() => as(PM2, () => q(`select project_member_decide($1, true)`, [reqLG])), 'cannot decide twice', /already approved/);
+ok((await notes(LG)).includes('You were added to Nova Shopify build') && (await notes(MG)).some((t) => t.startsWith('Approved:')), 'member and requester notified on approval');
+
+// Project manager adds → admin or a manager approves
+const reqFN = await as(PM2, async () => (await q(`select project_member_request($1, $2, 'Finance support') as id`, [pj.id, FN]))[0].id);
+ok((await q(`select approver from project_members where id=$1`, [reqFN]))[0].approver === 'manager', 'PM request waits for admin / manager');
+ok((await notes(A)).some((t) => t.startsWith('Approval needed')) && (await notes(MG)).some((t) => t.startsWith('Approval needed')), 'admin and managers both get the request');
+await expectErr(() => as(PM2, () => q(`select project_member_decide($1, true)`, [reqFN])), 'PM cannot approve their own request', /admin or a manager/);
+await expectErr(() => as(LG, () => q(`select project_member_request($1, $2, 'x')`, [pj.id, SR])), 'project member cannot add people', /Only the admin/);
+await as(A, () => q(`select project_member_decide($1, false, 'Not needed')`, [reqFN]));
+ok((await q(`select status, decided_by from project_members where id=$1`, [reqFN]))[0].decided_by === A, 'admin rejection recorded');
+ok((await notes(PM2)).some((t) => t.startsWith('Not approved:')), 'PM told the request was not approved');
+const reqFN2 = await as(PM2, async () => (await q(`select project_member_request($1, $2, 'Finance support') as id`, [pj.id, FN]))[0].id);
+await as(MG, () => q(`select project_member_decide($1, true)`, [reqFN2]));
+ok((await q(`select count(*)::int c from project_members where project_id=$1`, [pj.id]))[0].c === 3, 'history keeps every request (approved + rejected)');
+
+// Tasks, invoices, files on the project
+await as(PM2, async () => {
+  const [t] = await q(`insert into tasks (title, assigned_to, project_id) values ('Build theme', $1, $2) returning client_id`, [LG, pj.id]);
+  ok(Number(t.client_id) === Number(nova.id), 'project task carries the client');
+  await expectErr(() => q(`insert into tasks (title, assigned_to, project_id) values ('x', $1, $2)`, [SR, pj.id]), 'PM can only assign to approved project members', /row-level/);
+});
+await as(FN, async () => {
+  await q(`insert into invoices (client_id, project_id, invoice_number, amount) values ($1, $2, 'NV-1', 900)`, [nova.id, pj.id]);
+  await q(`insert into invoices (client_id, invoice_number, amount) values ($1, 'NV-2', 100)`, [nova.id]);
+});
+await as(PM2, async () => {
+  const inv = await q(`select invoice_number from invoices where client_id=$1`, [nova.id]);
+  ok(inv.length === 1 && inv[0].invoice_number === 'NV-1', 'PM sees only the invoices of their project');
+  await q(`insert into client_files (client_id, project_id, name, storage_path) values ($1, $2, 'brief.pdf', $3)`, [nova.id, pj.id, `${nova.id}/p${pj.id}/a-brief.pdf`]);
+  ok((await q(`select can_storage_file($1, 'view') ok`, [`${nova.id}/p${pj.id}/a-brief.pdf`]))[0].ok, 'PM can open their project files');
+  ok(!(await q(`select can_storage_file($1, 'view') ok`, [`${nova.id}/contract.pdf`]))[0].ok, 'PM cannot open client-wide files');
+});
+await as(LG, async () => {
+  ok((await q(`select count(*)::int c from projects where id=$1`, [pj.id]))[0].c === 1, 'approved member sees the project');
+  ok((await q(`select count(*)::int c from client_files where project_id=$1`, [pj.id]))[0].c === 1, 'member sees project files');
+  ok((await q(`select count(*)::int c from invoices where client_id=$1`, [nova.id]))[0].c === 0, 'member does not see invoices');
+});
+const lgRow = (await q(`select id from project_members where project_id=$1 and member_id=$2 and status='approved'`, [pj.id, LG]))[0].id;
+await as(PM2, () => q(`select project_member_remove($1)`, [lgRow]));
+await as(LG, async () => ok((await q(`select count(*)::int c from projects where id=$1`, [pj.id]))[0].c === 0, 'removed member loses access'));
+ok((await q(`select count(*)::int c from activity_logs where entity_type='project' and entity_id=$1`, [String(pj.id)]))[0].c >= 6, 'project actions are in the activity log');
+
+console.log('Part 4: moving client-level PMs and agents into projects');
+const before = (await q(`select project_manager from clients where id=$1`, [c2]))[0].project_manager;
+await ex(schema);
+const [moved] = await q(`select id, project_manager from projects where client_id=$1`, [c2]);
+ok(before === PM1 && moved?.project_manager === PM1, 're-running the schema moves the client PM into a project');
+ok((await q(`select project_manager from clients where id=$1`, [c2]))[0].project_manager === null, 'client-level PM cleared after the move');
+ok((await q(`select count(*)::int c from project_members where project_id=$1 and member_id=$2 and status='approved'`, [moved.id, LG]))[0].c === 1, 'client agents become approved project members');
+ok((await q(`select count(*)::int c from tasks where client_id=$1 and project_id is null`, [c2]))[0].c === 0, 'client tasks moved into the project');
+await ex(schema);
+ok((await q(`select count(*)::int c from projects where client_id=$1`, [c2]))[0].c === 1, 'move runs once (re-run is safe)');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -4,7 +4,7 @@ import { q } from './data.js';
 import { esc, icon, toast } from './ui.js';
 import { fmtRelative } from './time.js';
 
-const KIND_ICON = { task: 'tasks', review: 'check', lead: 'target', client: 'briefcase', finance: 'wallet', info: 'bell' };
+const KIND_ICON = { task: 'tasks', review: 'check', lead: 'target', client: 'briefcase', finance: 'wallet', project: 'folder', approval: 'shield', info: 'bell' };
 let lastSeenId = null;
 let panel = null;
 

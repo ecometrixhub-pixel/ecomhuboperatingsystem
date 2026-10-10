@@ -16,6 +16,7 @@ export function openTaskDrawer(taskId) {
   const drawer = openDrawer({ title: 'Task', body: loadingBlock(5), onClose: () => window.removeEventListener('ehos:data-changed', onExternal) });
   let reloading = false;
   let clientRow = null;
+  let projectRow = null;
   let dirCache = [];
   const onExternal = () => { if (!reloading) load(); };
   window.addEventListener('ehos:data-changed', onExternal);
@@ -39,7 +40,10 @@ export function openTaskDrawer(taskId) {
         return;
       }
       dirCache = await loadDirectory().catch(() => []);
-      clientRow = task.client_id ? await q(supabase.from('clients').select('id, name, project_manager').eq('id', task.client_id).maybeSingle()).catch(() => null) : null;
+      [clientRow, projectRow] = await Promise.all([
+        task.client_id ? q(supabase.from('clients').select('id, name, project_manager').eq('id', task.client_id).maybeSingle()).catch(() => null) : null,
+        task.project_id ? q(supabase.from('projects').select('id, name, project_manager').eq('id', task.project_id).maybeSingle()).catch(() => null) : null,
+      ]);
       render(task, comments, totals.get(task.id), entries, history, totals.fetchedAt);
     } catch (e) {
       drawer.querySelector('.drawer-body').innerHTML = `<div class="form-error">${esc(e.message)}</div>`;
@@ -48,7 +52,8 @@ export function openTaskDrawer(taskId) {
 
   function render(task, comments, tot, entries, history, fetchedAt) {
     const mine = task.assigned_to === state.profile.id;
-    const manage = state.isAdmin || Boolean(clientRow && clientRow.project_manager === state.profile.id);
+    const manage = state.isAdmin || Boolean(clientRow && clientRow.project_manager === state.profile.id)
+      || Boolean(projectRow && projectRow.project_manager === state.profile.id && state.pmPerms.projects?.edit);
     const myTotals = tot?.byUser?.[state.profile.id];
     const tState = timerStateFor(myTotals);
     const canTime = mine && ['todo', 'in_progress'].includes(task.status);
@@ -89,6 +94,7 @@ export function openTaskDrawer(taskId) {
         <dt>Assigned by</dt><dd>${(() => { const l = dirLabel(dirCache, task.created_by, state.roles); return l ? `<div class="who">${avatar({ first_name: l.name.split(' ')[0], last_name: l.name.split(' ')[1] || '' }, 'sm')}<div><div class="name">${esc(l.name)}</div>${l.title ? `<div class="sub">${esc(l.title)}</div>` : ''}</div></div>` : '<span class="muted">—</span>'; })()}</dd>
         <dt>Assigned to</dt><dd>${task.assignee ? `<div class="who">${avatar(task.assignee, 'sm')}<span>${esc(fullName(task.assignee))}</span></div>` : '<span class="muted">Nobody yet</span>'}</dd>
         <dt>Role</dt><dd>${task.team_role ? esc(roleName(task.team_role)) : '<span class="muted">Any role</span>'}</dd>
+        ${projectRow ? `<dt>Project</dt><dd><a href="#/projects?open=${projectRow.id}">${esc(projectRow.name)}</a></dd>` : ''}
         ${clientRow ? `<dt>Client</dt><dd>${esc(clientRow.name)}</dd>` : ''}
         <dt>Due date</dt><dd>${task.due_date ? esc(fmtDate(task.due_date)) : '<span class="muted">No due date</span>'}</dd>
         ${task.start_date ? `<dt>Start date</dt><dd>${esc(fmtDate(task.start_date))}</dd>` : ''}
@@ -207,7 +213,7 @@ export function openTaskDrawer(taskId) {
         await rpc('task_review', { p_task_id: task.id, p_approve: false, p_note: note });
         toast('Sent back with your notes');
       }
-      if (act === 'edit') { openTaskForm({ task, clientName: clientRow?.name || '', onSaved: () => { changed(); load(); } }); return; }
+      if (act === 'edit') { openTaskForm({ task, clientName: clientRow?.name || '', projectName: projectRow?.name || '', onSaved: () => { changed(); load(); } }); return; }
       if (act === 'delete') {
         const ok = await confirmDialog({ title: 'Delete this task?', text: `"${task.title}" and its comments will be removed. Tasks with tracked time can't be deleted.`, confirm: 'Delete task', danger: true });
         if (!ok) return;
@@ -225,11 +231,19 @@ export function openTaskDrawer(taskId) {
 
 // ---------------- Admin: create / edit task ----------------
 let membersCache = null;
-export async function openTaskForm({ task = null, presetMember = null, presetRole = null, clientId = null, clientName = '', memberOptions = null, onSaved } = {}) {
+export async function openTaskForm({ task = null, presetMember = null, presetRole = null, clientId = null, clientName = '', projectId = null, projectName = '', memberOptions = null, onSaved } = {}) {
   clientId = clientId || task?.client_id || null;
+  projectId = projectId || task?.project_id || null;
   let members = memberOptions;
   if (!members) {
-    if (!state.isAdmin && clientId) {
+    if (!state.isAdmin && projectId) {
+      const [team, dir, pr] = await Promise.all([
+        q(supabase.from('project_members').select('member_id, role_label').eq('project_id', projectId).eq('status', 'approved')), loadDirectory(),
+        q(supabase.from('projects').select('project_manager').eq('id', projectId).maybeSingle()),
+      ]);
+      members = team.map((t) => ({ id: t.member_id, first_name: `${dirName(dir, t.member_id)} (${t.role_label})`, last_name: '', roles: [], status: 'active' }));
+      if (pr?.project_manager) members.unshift({ id: pr.project_manager, first_name: `${dirName(dir, pr.project_manager)} (project manager)`, last_name: '', roles: [], status: 'active' });
+    } else if (!state.isAdmin && clientId) {
       const [team, dir] = await Promise.all([q(supabase.from('client_members').select('member_id, role_label').eq('client_id', clientId)), loadDirectory()]);
       members = team.map((t) => ({ id: t.member_id, first_name: `${dirName(dir, t.member_id)} (${t.role_label})`, last_name: '', roles: [], status: 'active' }));
     } else {
@@ -241,7 +255,7 @@ export async function openTaskForm({ task = null, presetMember = null, presetRol
 
   const m = openModal({
     title: task ? 'Edit task' : 'New task',
-    subtitle: clientName ? `For client ${esc(clientName)}` : '',
+    subtitle: projectName ? `For project ${esc(projectName)}${clientName ? ` (${esc(clientName)})` : ''}` : clientName ? `For client ${esc(clientName)}` : '',
     wide: true,
     body: `
       <form id="task-form" class="form-grid" novalidate>
@@ -274,7 +288,7 @@ export async function openTaskForm({ task = null, presetMember = null, presetRol
     const current = memberSel.value || t.assigned_to || '';
     const list = members.filter((x) => !role || memberOptions || !x.roles.length || x.roles.includes(role));
     memberSel.innerHTML = `<option value="">Unassigned</option>${list.map((x) => `<option value="${x.id}" ${x.id === current ? 'selected' : ''}>${esc(fullName(x))}${x.status === 'invited' ? ' (invited)' : ''}</option>`).join('')}`;
-    m.querySelector('#tf-member-hint').textContent = clientId ? 'Agents working on this client.' : role
+    m.querySelector('#tf-member-hint').textContent = projectId ? 'People on this project\'s team.' : clientId && memberOptions ? 'Agents working on this client.' : role
       ? (list.length ? `Showing members with the ${roleName(role)} role.` : `Nobody has the ${roleName(role)} role yet. Add it from the Team page.`)
       : '';
   };
@@ -297,6 +311,7 @@ export async function openTaskForm({ task = null, presetMember = null, presetRol
     };
     if (task) payload.status = m.querySelector('#tf-status').value;
     if (clientId) payload.client_id = clientId;
+    if (projectId) payload.project_id = projectId;
     if (!payload.title) { err.textContent = 'Give the task a title.'; err.classList.remove('hidden'); return; }
     if (payload.start_date && payload.due_date && payload.due_date < payload.start_date) {
       err.textContent = 'The due date is before the start date.'; err.classList.remove('hidden'); return;

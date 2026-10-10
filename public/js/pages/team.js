@@ -206,6 +206,7 @@ export async function render({ el, params }) {
         </div></div>
         <div><div class="section-title">Roles</div><div class="chips">${m.roles.map((r) => roleChip(r, state.roles)).join('') || '<span class="muted small">No role</span>'}</div></div>
         <div><div class="section-title">This week</div><div id="wk">${loadingBlock(1)}</div></div>
+        ${m.status !== 'inactive' && m.status !== 'suspended' ? `<div><div class="section-title">Projects</div><div id="mprojects">${loadingBlock(1)}</div></div>` : ''}
         <dl class="kv">
           <dt>Employee ID</dt><dd class="num">${esc(m.employee_code)}</dd>
           <dt>Phone</dt><dd>${esc(m.phone || '—')}</dd>
@@ -240,6 +241,23 @@ export async function render({ el, params }) {
         <div class="stat"><div class="v" style="font-size:19px">${fmtDuration(sum('timer_seconds'))}</div><div class="k"><i class="timer"></i>Task timer</div></div>
       </div></div>`;
     }).catch((e) => { const wk = drawer.querySelector('#wk'); if (wk) wk.innerHTML = `<p class="small muted">${esc(e.message)}</p>`; });
+
+    // projects this member is on (and "Add to a project", which goes for approval)
+    const box = drawer.querySelector('#mprojects');
+    const loadProjects = async () => {
+      if (!box?.isConnected) return;
+      try {
+        const pm = await import('./projects.js');
+        box.innerHTML = await pm.memberProjectsHtml(id);
+        box.querySelector('[data-add-project]').onclick = () => pm.openAddToProject({ memberId: id, memberName: fullName(m) });
+      } catch (e) { box.innerHTML = `<p class="small muted">${esc(e.message)}</p>`; }
+    };
+    if (box) {
+      loadProjects();
+      window.addEventListener('ehos:data-changed', loadProjects);
+      const obs = new MutationObserver(() => { if (!drawer.isConnected) { window.removeEventListener('ehos:data-changed', loadProjects); obs.disconnect(); } });
+      obs.observe(document.body, { childList: true });
+    }
 
     drawer.querySelector('[data-edit]').onclick = () => memberForm(m);
     drawer.querySelector('[data-link]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {

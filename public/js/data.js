@@ -39,7 +39,7 @@ export async function api(path, { method = 'GET', body } = {}) {
 }
 
 // ---------- Shared queries ----------
-export const TASK_FIELDS = 'id, title, description, status, priority, team_role, assigned_to, created_by, client_id, start_date, due_date, review_note, submitted_at, completed_at, created_at, updated_at, assignee:profiles!tasks_assigned_to_fkey(id, first_name, last_name, email, status)';
+export const TASK_FIELDS = 'id, title, description, status, priority, team_role, assigned_to, created_by, client_id, project_id, start_date, due_date, review_note, submitted_at, completed_at, created_at, updated_at, assignee:profiles!tasks_assigned_to_fkey(id, first_name, last_name, email, status)';
 
 export async function loadMembers({ includeAdmin = false } = {}) {
   let query = supabase.from('profiles')

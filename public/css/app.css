@@ -619,8 +619,8 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .perm-table td.c.first, .perm-table th.c.first { border-left: 1px solid var(--line); }
 .perm-table .lock { font-size: 12px; color: var(--muted); }
 
-.tabs-line { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -4px 0 0; }
-.tabs-line button { border: 0; background: none; padding: 10px 12px; font-weight: 500; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs-line { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -4px 0 0; overflow-x: auto; scrollbar-width: none; flex: none; }
+.tabs-line button { border: 0; background: none; padding: 10px 12px; font-weight: 500; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; flex: none; }
 .tabs-line button[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--accent); }
 .file-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--line); }
 .file-row:first-child { border-top: 0; }
@@ -688,6 +688,8 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .notif .ic.task, .notif .ic.review { background: var(--accent-bg); color: var(--accent); }
 .notif .ic.lead { background: #ECFEFF; color: #0E7490; }
 .notif .ic.client { background: #FDF2F8; color: #BE185D; }
+.notif .ic.project { background: #F5F3FF; color: #6D28D9; }
+.notif .ic.approval { background: var(--warning-bg); color: #B45309; }
 .notif .ic.finance { background: var(--success-bg); color: #15803D; }
 .notif .t { font-weight: 500; font-size: 13.5px; line-height: 1.35; }
 .notif .b { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
@@ -737,3 +739,27 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .timer-pill { gap: 6px; padding-left: 10px; }
   .timer-pill .btn-sm.btn-icon { width: 28px; height: 28px; }
 }
+
+/* ---------- Projects ---------- */
+.badge.planning { background: var(--section); color: var(--ink-2); }
+.badge.on_hold { background: var(--section); color: var(--muted); }
+.badge.pending { background: var(--warning-bg); color: #B45309; }
+.badge.approved { background: var(--success-bg); color: #15803D; }
+.badge.rejected, .badge.removed { background: var(--error-bg); color: #B91C1C; }
+.approvals { border: 1px solid #FCD34D; background: #FFFBEB; border-radius: var(--radius, 12px); padding: 14px 16px; margin-bottom: 16px; }
+.approvals h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: #92400E; }
+.approval-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid #FDE68A; flex-wrap: wrap; }
+.approval-row:first-of-type { border-top: 0; padding-top: 0; }
+.approval-row .grow { min-width: 200px; }
+.approval-row .title { font-weight: 500; }
+.approval-row .meta { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.history { position: relative; padding-left: 18px; }
+.history::before { content: ''; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 1px; background: var(--line); }
+.history .h-item { position: relative; padding: 0 0 14px; font-size: 13px; }
+.history .h-item::before { content: ''; position: absolute; left: -17px; top: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--surface, #fff); border: 2px solid var(--line); }
+.history .h-item.approved::before { border-color: var(--success); }
+.history .h-item.pending::before { border-color: var(--warning); }
+.history .h-item.rejected::before, .history .h-item.removed::before { border-color: var(--error); }
+.history .h-item .w { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.proj-progress { height: 6px; border-radius: 99px; background: var(--section); overflow: hidden; min-width: 80px; }
+.proj-progress i { display: block; height: 100%; background: var(--success); border-radius: 99px; }

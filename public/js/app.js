@@ -14,6 +14,7 @@ const ADMIN_NAV = [
   { route: 'tasks', label: 'Tasks', icon: 'tasks', page: 'tasks' },
   { route: 'leads', label: 'Leads', icon: 'target', page: 'leads' },
   { route: 'clients', label: 'Clients', icon: 'briefcase', page: 'clients' },
+  { route: 'projects', label: 'Projects', icon: 'folder', page: 'projects' },
   { route: 'finance', label: 'Finance', icon: 'wallet', page: 'finance' },
   { route: 'tracking', label: 'Work tracking', icon: 'chart', page: 'tracking' },
   { route: 'logins', label: 'Login history', icon: 'login', page: 'logins' },
@@ -32,6 +33,7 @@ function memberNav() {
     { route: 'my-tasks', label: 'My tasks', icon: 'tasks', page: 'my-tasks' },
     can('leads') && { route: 'leads', label: 'Leads', icon: 'target', page: 'leads' },
     (canAny('clients') || state.agentOf?.length) && { route: 'clients', label: state.perms.clients?.view ? 'Clients' : 'My clients', icon: 'briefcase', page: 'clients' },
+    (canAny('projects') || state.projectOf.length) && { route: 'projects', label: can('projects') ? 'Projects' : 'My projects', icon: 'folder', page: 'projects' },
     can('finance') && { route: 'finance', label: 'Finance', icon: 'wallet', page: 'finance' },
     { route: 'my-time', label: 'My work time', icon: 'clock', page: 'tracking' },
     { route: 'my-activity', label: 'My activity', icon: 'activity', page: 'my-activity' },
@@ -47,12 +49,13 @@ async function boot() {
   if (!session) return location.replace('/login.html');
   state.user = session.user;
 
-  const [profile, roles, settings, permRows, agentOf] = await Promise.all([
+  const [profile, roles, settings, permRows, agentOf, projectOf] = await Promise.all([
     q(supabase.from('profiles').select('*, member_roles(role_key)').eq('id', session.user.id).maybeSingle()),
     q(supabase.from('team_roles').select('*').order('sort')),
     q(supabase.from('app_settings').select('*').eq('id', 1).maybeSingle()),
     q(supabase.from('role_permissions').select('*')).catch(() => []),
     q(supabase.from('client_members').select('client_id').eq('member_id', session.user.id)).catch(() => []),
+    q(supabase.from('project_members').select('project_id').eq('member_id', session.user.id).eq('status', 'approved')).catch(() => []),
   ]);
   if (!profile) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
   if (['inactive', 'suspended'].includes(profile.status)) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
@@ -65,6 +68,7 @@ async function boot() {
   state.isAdmin = state.isOwner || state.myRoles.includes('manager');
   state.permRows = permRows || [];
   state.agentOf = (agentOf || []).map((r) => r.client_id);
+  state.projectOf = (projectOf || []).map((r) => r.project_id);
   computePerms();
   setTimezone(state.settings.timezone);
 
