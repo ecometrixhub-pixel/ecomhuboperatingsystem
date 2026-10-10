@@ -5,7 +5,7 @@ import { esc, toast, busy } from '../ui.js';
 import { setTimezone } from '../time.js';
 import { setIdleMinutes } from '../tracker.js';
 import { mountProfileForm, mountPasswordForm } from './profile.js';
-import { INVOICE_DEFAULTS } from '../invoices.js';
+import { INVOICE_DEFAULTS, LOGO_TYPES, LOGO_MAX_BYTES, safeLogo } from '../invoices.js';
 
 export async function render({ el }) {
   const s = state.settings;
@@ -38,6 +38,15 @@ export async function render({ el }) {
         <div class="panel-head"><div><h2>Invoice details</h2><p>Printed on every invoice: contact details, bank / Wise details and terms.</p></div></div>
         <div class="panel-body">
           <form id="invd" class="form-grid" novalidate>
+            <div class="field span-2"><label for="id-logo">Logo</label>
+              <div class="row wrap" style="gap:12px;align-items:center">
+                <div id="id-logo-box" style="height:56px;min-width:56px;max-width:240px;border:1px dashed var(--line-2);border-radius:10px;display:grid;place-items:center;padding:6px;background:#fff"></div>
+                <label class="btn btn-sm" for="id-logo">Upload logo</label>
+                <input id="id-logo" type="file" accept="${LOGO_TYPES.join(',')}" class="hidden">
+                <button type="button" class="btn btn-sm btn-ghost" id="id-logo-rm">Remove</button>
+              </div>
+              <label class="row" style="gap:8px;margin-top:8px;font-weight:400"><input type="checkbox" id="id-logo-name" ${inv.logo_has_name ? 'checked' : ''}> The logo already shows the company name (hide the name next to it)</label>
+              <span class="hint">PNG, JPG, WEBP or SVG, up to 300 KB. A transparent PNG looks best. Printed at the top of every invoice. Click "Save invoice details" after uploading.</span></div>
             <div class="field span-2"><label for="id-address">Address</label><input id="id-address" class="input" maxlength="300" value="${esc(inv.address || '')}" placeholder="Office, street, city, country"></div>
             <div class="field"><label for="id-email">Email</label><input id="id-email" class="input" type="email" maxlength="160" value="${esc(inv.email ?? INVOICE_DEFAULTS.email)}"></div>
             <div class="field"><label for="id-phone">Phone</label><input id="id-phone" class="input" maxlength="40" value="${esc(inv.phone ?? INVOICE_DEFAULTS.phone)}"></div>
@@ -86,6 +95,23 @@ export async function render({ el }) {
     });
   });
   const invForm = el.querySelector('#invd');
+  let logo = safeLogo(inv.logo) ? inv.logo : '';
+  const logoBox = invForm.querySelector('#id-logo-box'); const logoIn = invForm.querySelector('#id-logo');
+  const drawLogo = () => {
+    logoBox.innerHTML = logo ? `<img src="${esc(logo)}" alt="Logo" style="max-height:44px;max-width:228px;object-fit:contain">` : '<span class="muted small" style="padding:0 8px">No logo</span>';
+    invForm.querySelector('#id-logo-rm').classList.toggle('hidden', !logo);
+  };
+  drawLogo();
+  logoIn.addEventListener('change', () => {
+    const f = logoIn.files?.[0]; logoIn.value = '';
+    if (!f) return;
+    if (!LOGO_TYPES.includes(f.type)) { toast('Use a PNG, JPG, WEBP or SVG image', 'error'); return; }
+    if (f.size > LOGO_MAX_BYTES) { toast('The logo is bigger than 300 KB. Export a smaller version and try again.', 'error'); return; }
+    const r = new FileReader();
+    r.onload = () => { if (!safeLogo(r.result)) { toast('This image can\'t be used as a logo', 'error'); return; } logo = r.result; drawLogo(); toast('Logo ready. Save invoice details to keep it.'); };
+    r.readAsDataURL(f);
+  });
+  invForm.querySelector('#id-logo-rm').onclick = () => { logo = ''; drawLogo(); };
   invForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const v = (id) => invForm.querySelector(id).value.trim();
@@ -95,6 +121,7 @@ export async function render({ el }) {
       account_title: v('#id-title'), bank: v('#id-bank'), iban: v('#id-iban'), swift: v('#id-swift'), wallet: v('#id-wallet'), payment: v('#id-payment'),
       due_days: days('#id-due', 120, INVOICE_DEFAULTS.due_days), pause_days: days('#id-pause', 365, INVOICE_DEFAULTS.pause_days),
       footer_note: v('#id-footer'), terms: v('#id-terms'),
+      logo, logo_has_name: invForm.querySelector('#id-logo-name').checked,
     };
     busy(invForm.querySelector('[type=submit]'), async () => {
       try {

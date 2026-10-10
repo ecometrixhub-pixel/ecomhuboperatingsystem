@@ -177,7 +177,7 @@
   6. **Business invoices:** our own invoices for someone who isn't a client in the app (type name/company). Numbers **INV-EH001**, EH002 … Paid ones count as revenue too.
   - Company address, email, phone and **payment/bank details** for the invoice: Settings → **Invoice details** (admin).
   - **Invoice template = owner's own design** (`Ecometrix_Hub_07_Invoice.docx`), one A4 page:
-    1. Header: company + "TAX INVOICE" (just "INVOICE" when tax is 0%) + **Invoice INV-BUID-HF001**.
+    1. Header: **logo** (upload in Settings → Invoice details; PNG/JPG/WEBP/SVG up to 300 KB; tick "logo already shows the name" to hide the text name) + company + "TAX INVOICE" (just "INVOICE" when tax is 0%) + **Invoice INV-BUID-HF001**.
     2. Table: Invoice date · Due date · **Billing period** (e.g. "1–31 October 2026") · Currency · Reference no. · Status.
     3. **Billed to:** client name, contact person, **address** + country, email, BUID chip. (Client address is a field on Clients → Edit.)
     4. Items # / Description / Qty / Rate / Amount → Subtotal, Discount, Tax (x%), **Total due**.

@@ -66,6 +66,7 @@ export const INVOICE_CSS = `
 .inv-top { display:flex; justify-content:space-between; gap:24px; align-items:flex-start; padding-bottom:20px; border-bottom:3px solid var(--accent); }
 .inv-brand { display:flex; gap:12px; align-items:center; }
 .inv-mark { width:46px; height:46px; border-radius:11px; background:var(--accent); color:#fff; display:grid; place-items:center; font-weight:700; font-size:17px; flex:none; }
+.inv-logo { height:46px; max-width:220px; object-fit:contain; object-position:left center; display:block; flex:none; }
 .inv-brand h1 { margin:0; font-size:20px; letter-spacing:-.01em; }
 .inv-brand p { margin:1px 0 0; color:var(--muted); font-size:11.5px; white-space:pre-line; }
 .inv-title { text-align:right; }
@@ -127,6 +128,11 @@ if (typeof document !== 'undefined' && !document.getElementById('inv-doc-css')) 
   const st = document.createElement('style'); st.id = 'inv-doc-css'; st.textContent = INVOICE_CSS; document.head.append(st);
 }
 
+// Logo is stored in Settings as a small image data URL (png / jpg / webp / svg)
+export const LOGO_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'];
+export const LOGO_MAX_BYTES = 300 * 1024;
+export const safeLogo = (v) => typeof v === 'string' && /^data:image\/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(v) && v.length < LOGO_MAX_BYTES * 1.4;
+
 function companyInitials(name) {
   const w = String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
   if (!w.length) return 'EH';
@@ -155,8 +161,8 @@ export function invoiceDocHTML(inv, { client = null, project = null } = {}) {
   <article class="inv-doc">
     ${stamp ? `<div class="inv-stamp ${inv.status}">${stamp}</div>` : ''}
     <header class="inv-top">
-      <div class="inv-brand"><div class="inv-mark">${esc(companyInitials(company))}</div>
-        <div><h1>${esc(company)}</h1>${d.address ? `<p>${esc(d.address)}</p>` : ''}</div></div>
+      <div class="inv-brand">${safeLogo(d.logo) ? `<img class="inv-logo" src="${esc(d.logo)}" alt="${esc(company)} logo">` : `<div class="inv-mark">${esc(companyInitials(company))}</div>`}
+        <div>${d.logo_has_name && safeLogo(d.logo) ? '' : `<h1>${esc(company)}</h1>`}${d.address ? `<p>${esc(d.address)}</p>` : ''}</div></div>
       <div class="inv-title"><div class="inv-kicker">${tax ? 'TAX INVOICE' : 'INVOICE'}</div>
         <h2><span>Invoice</span> ${esc(inv.invoice_number || '—')}</h2></div>
     </header>
