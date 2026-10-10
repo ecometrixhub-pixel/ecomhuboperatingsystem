@@ -6,7 +6,7 @@ import { q, rpc, loadDirectory, dirName } from '../data.js';
 import { esc, icon, emptyState, loadingBlock, on, openModal, confirmDialog, toast, busy, downloadCSV } from '../ui.js';
 import { fmtDate, todayStr, daysBetween } from '../time.js';
 import { moneyFieldsHTML, bindMoneyFields, fmtCur, fmtPaid, baseCurrency, fetchRate } from '../currency.js';
-import { invoiceBadge, invoiceState, openInvoiceForm, openClientDrawer, INVOICE_STATUS } from './clients.js';
+import { invoiceBadge, invoiceState, INVOICE_STATUS, invAmount, partyName, openInvoiceEditor, openInvoiceView } from '../invoices.js';
 
 export const CATS = {
   tools: 'Tools & software', salary: 'Salaries', rent: 'Rent & office', ads: 'Ads & marketing', freelancers: 'Freelancers',
@@ -15,10 +15,11 @@ export const CATS = {
 const CAT_COLOR = { tools: '#4F46E5', salary: '#0EA5E9', rent: '#F59E0B', ads: '#DB2777', freelancers: '#8B5CF6', utilities: '#14B8A6', equipment: '#64748B', travel: '#F97316', taxes: '#DC2626', other: '#94A3B8' };
 const FREQ = { once: 'One time', weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Every 3 months', yearly: 'Yearly' };
 const KIND = { capital: 'Capital', loan: 'Loan', grant: 'Grant', other: 'Other' };
-const TABS = [['overview', 'Dashboard', 'dashboard'], ['expenses', 'Expenses', 'wallet'], ['recurring', 'Bills & salaries', 'calendar'], ['investments', 'Investments', 'trending'], ['invoices', 'Invoices', 'file'], ['report', 'Monthly report', 'chart']];
+const TABS = [['overview', 'Dashboard', 'dashboard'], ['expenses', 'Expenses', 'wallet'], ['recurring', 'Bills & salaries', 'calendar'], ['investments', 'Investments', 'trending'], ['invoices', 'Client invoices', 'file'], ['biz-invoices', 'Business invoices', 'briefcase'], ['report', 'Monthly report', 'chart']];
 const changed = () => window.dispatchEvent(new CustomEvent('ehos:data-changed'));
 const catName = (k) => CATS[k] || k;
 const salaryOk = () => state.isAdmin;
+const bizCode = () => { const w = String(state.settings?.company_name || 'Ecometrix Hub').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean); return !w.length ? 'CL' : w.length > 1 ? w[0][0] + w[1][0] : w[0][0] + w[0].slice(-1); };
 const monthLabel = (ym) => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${ym}-01T00:00:00Z`));
 const shortMonth = (ym) => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(`${ym}-01T00:00:00Z`));
 const shiftMonth = (ym, n) => { const d = new Date(`${ym}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + n); return d.toISOString().slice(0, 7); };
@@ -36,7 +37,7 @@ export async function render({ el, params }) {
   let tab = params.get('tab') || 'overview';
   let reportMonth = params.get('month') || todayStr().slice(0, 7);
   let expMonth = todayStr().slice(0, 7); let expCat = ''; let expSearch = '';
-  let invFilter = 'unpaid'; let invSearch = '';
+  let invFilter = 'all'; let invSearch = '';
   let dir = [];
   const edit = can('finance', 'edit'); const del = can('finance', 'delete');
 
@@ -63,7 +64,8 @@ export async function render({ el, params }) {
     else if (tab === 'expenses') await expenses();
     else if (tab === 'recurring') await recurring();
     else if (tab === 'investments') await investments();
-    else if (tab === 'invoices') await invoicesTab();
+    else if (tab === 'invoices') await invoicesTab('client');
+    else if (tab === 'biz-invoices') await invoicesTab('business');
     else await report();
   }
 
@@ -220,33 +222,41 @@ export async function render({ el, params }) {
     });
   }
 
-  // ---------- Invoices ----------
-  async function invoicesTab() {
-    const invoices = await q(supabase.from('invoices').select('*, client:clients(id, name)').order('issue_date', { ascending: false }).limit(3000));
+  // ---------- Invoices (client / business) ----------
+  async function invoicesTab(kind) {
+    const biz = kind === 'business';
+    const invoices = await q(supabase.from('invoices').select('*, client:clients(id, name, buid)').eq('kind', kind).order('issue_date', { ascending: false }).order('id', { ascending: false }).limit(3000));
     const groups = { unpaid: (i) => i.status === 'sent', overdue: (i) => invoiceState(i) === 'overdue', paid: (i) => i.status === 'paid', draft: (i) => i.status === 'draft', all: () => true };
     const s = invSearch.toLowerCase();
-    const list = invoices.filter(groups[invFilter]).filter((i) => !s || `${i.client?.name || ''} ${i.invoice_number || ''}`.toLowerCase().includes(s));
+    const list = invoices.filter(groups[invFilter]).filter((i) => !s || `${partyName(i)} ${i.client?.buid || ''} ${i.invoice_number || ''} ${i.reference_no || ''} ${i.bill_to?.name || ''}`.toLowerCase().includes(s));
     const total = list.reduce((a, i) => a + Number(i.amount), 0);
     body.innerHTML = `
+      <p class="muted small" style="margin:0 0 12px">${biz
+        ? 'Our own invoices for people who aren\'t clients in EcomHub OS. Numbers run INV-' + esc(bizCode()) + '001, 002… Paid ones count as revenue.'
+        : 'Invoices for clients. Numbers come from the client\'s business ID: INV-BUID-HF001, HF002… Paid ones count as revenue.'}</p>
       <div class="toolbar"><div class="seg" role="group" aria-label="Invoice status">${[['unpaid', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['draft', 'Draft'], ['all', 'All']]
         .map(([k, v]) => `<button data-f="${k}" aria-pressed="${invFilter === k}">${v}<span class="count">${invoices.filter(groups[k]).length}</span></button>`).join('')}</div>
-        <div class="search grow">${icon('search', 15)}<input class="input" id="inv-q" value="${esc(invSearch)}" placeholder="Search client or invoice number" aria-label="Search invoices"></div>
-        <button class="btn" data-inv-csv>${icon('download', 15)}CSV</button>${edit ? `<button class="btn btn-primary" data-new-invoice>${icon('plus', 15)}New invoice</button>` : ''}</div>
+        <div class="search grow">${icon('search', 15)}<input class="input" id="inv-q" value="${esc(invSearch)}" placeholder="${biz ? 'Search name or invoice number' : 'Search client, BUID or invoice number'}" aria-label="Search invoices"></div>
+        <button class="btn" data-inv-csv>${icon('download', 15)}CSV</button>${edit ? `<button class="btn btn-primary" data-new-invoice>${icon('plus', 15)}New ${biz ? 'business' : 'client'} invoice</button>` : ''}</div>
       <section class="panel"><div class="table-wrap">${list.length ? `<table class="table">
-        <thead><tr><th>Invoice</th><th>Client</th><th>Issued</th><th>Due</th><th>Status</th><th class="r">Amount</th></tr></thead>
-        <tbody>${list.map((i) => `<tr class="clickable" data-client="${i.client_id}" tabindex="0">
-          <td><div style="font-weight:500">${esc(i.invoice_number || `#${i.id}`)}</div><div class="small muted">${esc(i.description || '')}</div></td>
-          <td>${esc(i.client?.name || '—')}</td><td class="small">${esc(fmtDate(i.issue_date))}</td><td class="small">${esc(fmtDate(i.due_date))}</td>
-          <td>${invoiceBadge(i)}</td><td class="r money"><b>${money(i.amount)}</b></td></tr>`).join('')}</tbody>
-        <tfoot><tr><td colspan="5">Total</td><td class="r money">${money(total)}</td></tr></tfoot></table>`
-        : emptyState(invoices.length ? 'No invoices here' : 'No invoices yet', invoices.length ? '' : 'Add invoices from a client, a project, or with New invoice.')}</div></section>`;
-    body.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { invFilter = b.dataset.f; invoicesTab(); });
+        <thead><tr><th>Invoice</th><th>${biz ? 'Billed to' : 'Client'}</th><th>Issued</th><th>Due</th><th>Status</th><th class="r">Amount</th></tr></thead>
+        <tbody>${list.map((i) => `<tr class="clickable" data-inv="${i.id}" tabindex="0">
+          <td><div style="font-weight:500">${esc(i.invoice_number || `#${i.id}`)}</div><div class="small muted">${esc(i.description || i.reference_no || '')}</div></td>
+          <td>${esc(partyName(i))}${!biz && i.client?.buid ? `<div class="small muted">${esc(i.client.buid)}</div>` : biz && i.bill_to?.company && i.bill_to?.name ? `<div class="small muted">${esc(i.bill_to.name)}</div>` : ''}</td>
+          <td class="small">${esc(fmtDate(i.issue_date))}</td><td class="small">${esc(fmtDate(i.due_date))}</td>
+          <td>${invoiceBadge(i)}</td><td class="r money"><b>${invAmount(i)}</b></td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="5">Total (${esc(state.settings.currency || 'USD')})</td><td class="r money">${money(total)}</td></tr></tfoot></table>`
+        : emptyState(invoices.length ? 'No invoices here' : 'No invoices yet', invoices.length ? '' : biz ? 'Create one with New business invoice.' : 'Create one with New client invoice: pick the client, add the lines, done.')}</div></section>`;
+    body.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { invFilter = b.dataset.f; invoicesTab(kind); });
     const qi = body.querySelector('#inv-q');
-    qi.oninput = () => { invSearch = qi.value.trim(); clearTimeout(qi._t); qi._t = setTimeout(() => invoicesTab().then(() => { const n = body.querySelector('#inv-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }), 250); };
-    body.querySelector('[data-new-invoice]')?.addEventListener('click', () => openInvoiceForm());
-    body.querySelector('[data-inv-csv]').onclick = () => downloadCSV('invoices.csv', [['Invoice', 'Client', 'Description', 'Issued', 'Due', 'Status', 'Paid on', 'Amount'],
-      ...list.map((i) => [i.invoice_number || i.id, i.client?.name || '', i.description, i.issue_date, i.due_date || '', invoiceState(i) === 'overdue' ? 'Overdue' : INVOICE_STATUS[i.status], i.paid_date || '', i.amount])]);
-    body.querySelectorAll('tr[data-client]').forEach((tr) => tr.onclick = () => openClientDrawer(Number(tr.dataset.client), 'invoices'));
+    qi.oninput = () => { invSearch = qi.value.trim(); clearTimeout(qi._t); qi._t = setTimeout(() => invoicesTab(kind).then(() => { const n = body.querySelector('#inv-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }), 250); };
+    body.querySelector('[data-new-invoice]')?.addEventListener('click', () => openInvoiceEditor({ kind }));
+    body.querySelector('[data-inv-csv]').onclick = () => downloadCSV(`${biz ? 'business' : 'client'}-invoices.csv`, [['Invoice', 'Reference', biz ? 'Billed to' : 'Client', 'BUID', 'Description', 'Issued', 'Due', 'Status', 'Paid on', 'Currency', 'Amount', `Amount (${state.settings.currency || 'USD'})`, 'Issued by'],
+      ...list.map((i) => [i.invoice_number || i.id, i.reference_no || '', partyName(i), i.client?.buid || '', i.description, i.issue_date, i.due_date || '', invoiceState(i) === 'overdue' ? 'Overdue' : INVOICE_STATUS[i.status], i.paid_date || '', i.currency || '', i.amount_original ?? i.amount, i.amount, [i.issued_by_name, i.issued_by_title].filter(Boolean).join(', ')])]);
+    body.querySelectorAll('tr[data-inv]').forEach((tr) => {
+      tr.onclick = () => openInvoiceView(Number(tr.dataset.inv));
+      tr.onkeydown = (e) => { if (e.key === 'Enter') openInvoiceView(Number(tr.dataset.inv)); };
+    });
   }
 
   // ---------- Monthly report ----------

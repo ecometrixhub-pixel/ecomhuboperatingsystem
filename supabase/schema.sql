@@ -3092,4 +3092,367 @@ revoke execute on all functions in schema public from public, anon;
 revoke execute on function public.recurring_post(bigint, numeric, date) from authenticated;
 grant execute on function public.advance_due(date, text), public.finance_overview() to authenticated;
 
+
+
+-- =====================================================================
+--  PART 10 — Invoices v2
+--  * Every client gets a business ID (BUID-1001, BUID-1002 …) and a short
+--    invoice code from its name ("Him Fashions" → HF; one word → first and
+--    last letter; if the code is taken, another unique one from the name).
+--  * Invoice numbers are made by the database: client invoices
+--    INV-BUID-HF001, INV-BUID-HF002 …; business invoices (our own, not
+--    for a client in the app) INV-<company initials>001 …
+--  * Reference number, issue date, "Issued by" name + designation are filled
+--    in automatically. Line items, tax, discount and any currency.
+-- =====================================================================
+
+-- ---------- Small helpers ----------
+create or replace function public.num_pad(p bigint, w int) returns text
+language sql immutable as $$
+  select case when length(p::text) >= w then p::text else lpad(p::text, w, '0') end;
+$$;
+
+-- "Him Fashions" → HF, "Glow" → GW (first + last letter), "" → CL
+create or replace function public.name_initials(p_name text) returns text
+language plpgsql immutable as $$
+declare w text[]; l text;
+begin
+  w := array_remove(regexp_split_to_array(upper(regexp_replace(coalesce(p_name, ''), '[^A-Za-z0-9]+', ' ', 'g')), ' '), '');
+  l := array_to_string(w, '');
+  if l = '' then return 'CL'; end if;
+  if array_length(w, 1) >= 2 then return left(w[1], 1) || left(w[2], 1); end if;
+  if length(l) = 1 then return l || 'X'; end if;
+  return left(l, 1) || right(l, 1);
+end $$;
+
+-- A code no other client has, built from the name
+create or replace function public.invoice_initials(p_name text, p_exclude bigint default null) returns text
+language plpgsql security definer set search_path = public as $$
+declare w text[]; l text; c text; cands text[] := '{}'; i int; j int; n int := 2;
+begin
+  w := array_remove(regexp_split_to_array(upper(regexp_replace(coalesce(p_name, ''), '[^A-Za-z0-9]+', ' ', 'g')), ' '), '');
+  l := left(array_to_string(w, ''), 24);
+  if l = '' then l := 'CL'; w := array['CL']; end if;
+  if length(l) = 1 then l := l || 'X'; end if;
+  cands := cands || name_initials(p_name);                         -- the rule
+  cands := cands || (left(l, 1) || right(l, 1));                   -- first + last letter
+  for i in 2..length(l) loop cands := cands || (left(l, 1) || substr(l, i, 1)); end loop;  -- first + any other letter
+  if array_length(w, 1) >= 3 then cands := cands || (left(w[1], 1) || left(w[2], 1) || left(w[3], 1)); end if;
+  for i in 2..length(l) loop for j in i + 1..length(l) loop
+    cands := cands || (left(l, 1) || substr(l, i, 1) || substr(l, j, 1));
+  end loop; end loop;
+  foreach c in array cands loop
+    if not exists (select 1 from clients where invoice_code = c and id is distinct from p_exclude) then return c; end if;
+  end loop;
+  loop
+    c := cands[1] || n;
+    if not exists (select 1 from clients where invoice_code = c and id is distinct from p_exclude) then return c; end if;
+    n := n + 1;
+  end loop;
+end $$;
+
+-- "Co-Founder", or "Admin", or the team roles
+create or replace function public.issuer_title(p_id uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce(nullif(trim(p.job_title), ''), case when p.role = 'admin' then 'Admin' end,
+                  (select string_agg(r.name, ', ' order by r.sort) from member_roles m join team_roles r on r.key = m.role_key where m.member_id = p.id))
+    from profiles p where p.id = p_id;
+$$;
+
+-- ---------- Clients: BUID + invoice code ----------
+create sequence if not exists public.client_buid_seq start 1001;
+alter table public.clients add column if not exists buid text;
+alter table public.clients add column if not exists invoice_code text;
+create unique index if not exists clients_buid_uq on public.clients (buid);
+create unique index if not exists clients_invoice_code_uq on public.clients (invoice_code);
+
+create or replace function public.clients_codes_before() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.buid := null; new.invoice_code := null;
+  else
+    new.buid := old.buid; new.invoice_code := old.invoice_code;   -- never change once given
+  end if;
+  if new.buid is null then new.buid := 'BUID-' || nextval('public.client_buid_seq'); end if;
+  if new.invoice_code is null then
+    perform pg_advisory_xact_lock(hashtext('ehos.invoice_code'));
+    new.invoice_code := invoice_initials(new.name, new.id);
+  end if;
+  return new;
+end $$;
+drop trigger if exists clients_codes on public.clients;
+create trigger clients_codes before insert or update on public.clients for each row execute function public.clients_codes_before();
+
+-- Existing clients, oldest first (quietly, no notifications)
+do $$ declare r record; begin
+  if exists (select 1 from public.clients where buid is null or invoice_code is null) then
+    alter table public.clients disable trigger clients_notify;
+    for r in select id from public.clients where buid is null or invoice_code is null order by id loop
+      update public.clients set buid = null where id = r.id;   -- the trigger fills both
+    end loop;
+    alter table public.clients enable trigger clients_notify;
+  end if;
+end $$;
+
+-- ---------- Invoices ----------
+alter table public.invoices alter column client_id drop not null;
+alter table public.invoices add column if not exists kind text not null default 'client';
+alter table public.invoices add column if not exists reference_no text;
+alter table public.invoices add column if not exists bill_to jsonb not null default '{}'::jsonb;
+alter table public.invoices add column if not exists items jsonb not null default '[]'::jsonb;
+alter table public.invoices add column if not exists tax_percent numeric(6, 2) not null default 0;
+alter table public.invoices add column if not exists discount numeric(14, 2) not null default 0;
+alter table public.invoices add column if not exists notes text not null default '';
+alter table public.invoices add column if not exists currency text;
+alter table public.invoices add column if not exists amount_original numeric(14, 2);
+alter table public.invoices add column if not exists fx_rate numeric(20, 10);
+alter table public.invoices add column if not exists issued_by uuid references public.profiles(id);
+alter table public.invoices add column if not exists issued_by_name text;
+alter table public.invoices add column if not exists issued_by_title text;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'invoices_kind_check') then
+    alter table public.invoices add constraint invoices_kind_check check (kind in ('client', 'business'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'invoices_kind_client_check') then
+    alter table public.invoices add constraint invoices_kind_client_check check ((kind = 'client') = (client_id is not null));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'invoices_tax_check') then
+    alter table public.invoices add constraint invoices_tax_check check (tax_percent between 0 and 100 and discount >= 0);
+  end if;
+end $$;
+create index if not exists invoices_kind_idx on public.invoices (kind, issue_date desc);
+
+-- Next number per client / for the business
+create table if not exists public.invoice_counters (
+  key   text primary key,
+  last  int not null default 0
+);
+alter table public.invoice_counters enable row level security;
+revoke all on public.invoice_counters from anon, authenticated;
+grant all on public.invoice_counters to service_role;
+
+-- Company details printed on every invoice (address, email, phone, website, payment details, terms)
+alter table public.app_settings add column if not exists invoice_details jsonb not null default '{}'::jsonb;
+grant update (invoice_details) on public.app_settings to authenticated;
+
+-- Old invoices: app currency, a reference number, and their creator as "Issued by" (quietly)
+do $$ begin
+  if exists (select 1 from public.invoices where currency is null or reference_no is null) then
+    alter table public.invoices disable trigger user;
+    update public.invoices i set
+      currency = coalesce(i.currency, (select currency from public.app_settings where id = 1), 'USD'),
+      amount_original = coalesce(i.amount_original, i.amount), fx_rate = coalesce(i.fx_rate, 1),
+      reference_no = coalesce(i.reference_no, 'REF-' || to_char(i.issue_date, 'YYMMDD') || '-' || public.num_pad(i.id, 4)),
+      issued_by = coalesce(i.issued_by, i.created_by),
+      issued_by_name = coalesce(i.issued_by_name, public.member_name(i.created_by)),
+      issued_by_title = coalesce(i.issued_by_title, public.issuer_title(i.created_by))
+    where i.currency is null or i.reference_no is null;
+    alter table public.invoices enable trigger user;
+  end if;
+end $$;
+
+-- Runs after the project link (alphabetical trigger order): number, totals, currency, issuer
+create or replace function public.invoices_details_before() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_base text := upper(coalesce((select currency from app_settings where id = 1), 'USD'));
+        v_item jsonb; v_sub numeric := 0; v_code text; v_seq int; v_qty numeric; v_rate numeric;
+begin
+  if tg_op = 'UPDATE' then
+    new.kind := old.kind;
+    new.invoice_number := coalesce(old.invoice_number, new.invoice_number);
+    new.reference_no := old.reference_no;
+    new.issued_by := old.issued_by; new.issued_by_name := old.issued_by_name; new.issued_by_title := old.issued_by_title;
+  end if;
+  new.kind := coalesce(new.kind, 'client');
+  if new.kind = 'business' then
+    new.client_id := null; new.project_id := null;
+    new.bill_to := coalesce(new.bill_to, '{}'::jsonb);
+    if coalesce(trim(new.bill_to ->> 'name'), '') = '' then raise exception 'Enter who this invoice is for'; end if;
+  elsif new.client_id is null then
+    raise exception 'Choose a client';
+  end if;
+
+  -- line items → total (discount first, then tax)
+  new.items := coalesce(new.items, '[]'::jsonb);
+  if jsonb_typeof(new.items) <> 'array' then raise exception 'Line items are not valid'; end if;
+  if jsonb_array_length(new.items) > 100 then raise exception 'An invoice can have up to 100 lines'; end if;
+  new.tax_percent := coalesce(new.tax_percent, 0); new.discount := coalesce(new.discount, 0);
+  if jsonb_array_length(new.items) > 0 then
+    for v_item in select value from jsonb_array_elements(new.items) loop
+      if coalesce(trim(v_item ->> 'description'), '') = '' then raise exception 'Every line needs a description'; end if;
+      v_qty := coalesce(nullif(v_item ->> 'qty', '')::numeric, 1); v_rate := coalesce(nullif(v_item ->> 'rate', '')::numeric, 0);
+      if v_qty < 0 or v_rate < 0 then raise exception 'Quantity and price can''t be negative'; end if;
+      v_sub := v_sub + round(v_qty * v_rate, 2);
+    end loop;
+    if new.discount > v_sub then raise exception 'The discount is more than the invoice total'; end if;
+    new.amount_original := round((v_sub - new.discount) * (1 + new.tax_percent / 100), 2);
+    if coalesce(trim(new.description), '') = '' then new.description := left(new.items -> 0 ->> 'description', 300); end if;
+  elsif tg_op = 'UPDATE' and new.amount is distinct from old.amount and new.amount_original is not distinct from old.amount_original then
+    new.amount_original := round(new.amount / nullif(coalesce(new.fx_rate, 1), 0), 2);   -- an older screen changed only the amount
+  end if;
+
+  -- currency: amount = converted to the app currency for every total
+  new.currency := upper(coalesce(nullif(trim(new.currency), ''), v_base));
+  if new.currency !~ '^[A-Z]{3}$' then raise exception 'Pick a valid currency'; end if;
+  new.amount_original := coalesce(new.amount_original, new.amount);
+  if new.amount_original is null or new.amount_original < 0 then raise exception 'Enter the amount'; end if;
+  if new.currency = v_base then new.fx_rate := 1;
+  elsif new.fx_rate is null or new.fx_rate <= 0 then raise exception 'Add the exchange rate from % to %', new.currency, v_base;
+  end if;
+  new.amount := round(new.amount_original * new.fx_rate, 2);
+
+  if tg_op = 'INSERT' then
+    new.issue_date := coalesce(new.issue_date, (now() at time zone app_tz())::date);
+    new.issued_by := coalesce(auth.uid(), new.issued_by, new.created_by);
+    new.issued_by_name := coalesce(member_name(new.issued_by), new.issued_by_name);
+    new.issued_by_title := coalesce(issuer_title(new.issued_by), new.issued_by_title);
+    if coalesce(trim(new.invoice_number), '') = '' then
+      if new.kind = 'business' then
+        insert into invoice_counters (key, last) values ('business', 1)
+          on conflict (key) do update set last = invoice_counters.last + 1 returning last into v_seq;
+        new.invoice_number := 'INV-' || name_initials((select company_name from app_settings where id = 1)) || num_pad(v_seq, 3);
+      else
+        select invoice_code into v_code from clients where id = new.client_id;
+        insert into invoice_counters (key, last) values ('client:' || new.client_id, 1)
+          on conflict (key) do update set last = invoice_counters.last + 1 returning last into v_seq;
+        new.invoice_number := 'INV-BUID-' || coalesce(v_code, 'CL') || num_pad(v_seq, 3);
+      end if;
+    end if;
+    new.reference_no := 'REF-' || to_char(new.issue_date, 'YYMMDD') || '-' || num_pad(new.id, 4);
+  end if;
+  return new;
+end $$;
+drop trigger if exists invoices_x_details on public.invoices;
+create trigger invoices_x_details before insert or update on public.invoices for each row execute function public.invoices_details_before();
+
+-- What the next number will be (shown on the form before saving)
+create or replace function public.invoice_next_number(p_kind text, p_client bigint default null) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare v_code text; v_last int;
+begin
+  if not perm('finance', 'edit') and not (p_client is not null and can_invoice(p_client, 'edit')) then
+    raise exception 'You don''t have permission to add invoices';
+  end if;
+  if p_kind = 'business' then
+    select last into v_last from invoice_counters where key = 'business';
+    return 'INV-' || name_initials((select company_name from app_settings where id = 1)) || num_pad(coalesce(v_last, 0) + 1, 3);
+  end if;
+  select invoice_code into v_code from clients where id = p_client;
+  if v_code is null then return null; end if;
+  select last into v_last from invoice_counters where key = 'client:' || p_client;
+  return 'INV-BUID-' || v_code || num_pad(coalesce(v_last, 0) + 1, 3);
+end $$;
+
+-- Who the invoice is for (client name or the typed name)
+create or replace function public.invoice_party(p_client bigint, p_bill_to jsonb) returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce((select name from clients where id = p_client), nullif(trim(p_bill_to ->> 'company'), ''), nullif(trim(p_bill_to ->> 'name'), ''), 'business invoice');
+$$;
+
+-- Activity log for invoices (client and business)
+create or replace function public.invoices_log_after() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_party text := invoice_party(coalesce(new.client_id, old.client_id), coalesce(new.bill_to, old.bill_to));
+        v_type text := case when coalesce(new.kind, old.kind) = 'business' then 'finance' else 'client' end;
+        v_eid text := coalesce(new.client_id, old.client_id, new.id, old.id)::text;
+begin
+  if tg_op = 'INSERT' then
+    perform log_event('invoice_created', v_type, v_eid,
+      'Added invoice ' || coalesce(new.invoice_number, '#' || new.id) || ' for ' || v_party || ' (' || new.currency || ' ' || new.amount_original || ')');
+  elsif tg_op = 'UPDATE' and new.status is distinct from old.status then
+    perform log_event(case when new.status = 'paid' then 'invoice_paid' else 'invoice_updated' end, v_type, v_eid,
+      'Invoice ' || coalesce(new.invoice_number, '#' || new.id) || ' for ' || v_party || ' is ' || new.status);
+  elsif tg_op = 'DELETE' then
+    perform log_event('invoice_deleted', v_type, v_eid, 'Deleted invoice ' || coalesce(old.invoice_number, '#' || old.id));
+  end if;
+  return coalesce(new, old);
+end $$;
+drop trigger if exists invoices_after on public.invoices;
+create trigger invoices_after after insert or update or delete on public.invoices for each row execute function public.invoices_log_after();
+
+-- Notifications: name the client or the business invoice's customer
+create or replace function public.finance_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_party text; v_title text; v_who text := coalesce(member_name(auth.uid()), 'System'); v_pm uuid;
+        v_amt text := coalesce(new.currency, old.currency, '') || ' ' || coalesce(new.amount_original, new.amount, old.amount_original, old.amount);
+begin
+  if tg_op = 'UPDATE' and (to_jsonb(new) - 'project_id' - 'updated_at') = (to_jsonb(old) - 'project_id' - 'updated_at') then return new; end if;
+  v_party := invoice_party(coalesce(new.client_id, old.client_id), coalesce(new.bill_to, old.bill_to));
+  v_title := case
+    when tg_op = 'INSERT' then 'New invoice for ' || v_party || ': ' || v_amt || coalesce(' (' || new.invoice_number || ')', '')
+    when tg_op = 'DELETE' then 'Invoice deleted for ' || v_party
+    when new.status = 'paid' and old.status <> 'paid' then 'Invoice paid by ' || v_party || ': ' || v_amt
+    else 'Invoice updated for ' || v_party end;
+  perform notify_managers('finance', v_title, 'By ' || v_who, '#/finance?tab=' || case when coalesce(new.kind, old.kind) = 'business' then 'biz-invoices' else 'invoices' end);
+  perform notify_role('finance', 'finance', v_title, 'By ' || v_who, '#/finance?tab=' || case when coalesce(new.kind, old.kind) = 'business' then 'biz-invoices' else 'invoices' end);
+  select project_manager into v_pm from projects where id = coalesce(new.project_id, old.project_id);
+  if v_pm is not null and not is_manager_id(v_pm) and not exists (select 1 from member_roles where member_id = v_pm and role_key = 'finance') then
+    perform notify(v_pm, 'finance', v_title, 'By ' || v_who, '#/projects?open=' || coalesce(new.project_id, old.project_id) || '&tab=invoices');
+  end if;
+  return coalesce(new, old);
+end $$;
+
+-- Monthly report: business invoices show their customer
+create or replace function public.finance_report(p_month date) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_from date := date_trunc('month', p_month)::date; v_to date; v_prev date; v_sal boolean := is_manager(); r jsonb;
+        v_rev numeric; v_exp numeric;
+begin
+  if not perm('finance', 'view') then raise exception 'You don''t have access to finance'; end if;
+  v_to := (v_from + interval '1 month')::date; v_prev := (v_from - interval '1 month')::date;
+  select coalesce(sum(amount), 0) into v_rev from invoices where status = 'paid' and paid_date >= v_from and paid_date < v_to;
+  select coalesce(sum(amount), 0) into v_exp from expenses where spent_on >= v_from and spent_on < v_to;
+  select jsonb_build_object(
+    'month', to_char(v_from, 'YYYY-MM'), 'currency', (select currency from app_settings where id = 1), 'show_salaries', v_sal,
+    'revenue', v_rev, 'expenses', v_exp, 'net', v_rev - v_exp,
+    'salaries', coalesce((select sum(amount) from expenses where category = 'salary' and spent_on >= v_from and spent_on < v_to), 0),
+    'invoiced', coalesce((select sum(amount) from invoices where status in ('sent', 'paid') and issue_date >= v_from and issue_date < v_to), 0),
+    'investments', coalesce((select sum(amount) from investments where invested_on >= v_from and invested_on < v_to), 0),
+    'cash_end', coalesce((select sum(amount) from investments where invested_on < v_to), 0)
+              + coalesce((select sum(amount) from invoices where status = 'paid' and paid_date < v_to), 0)
+              - coalesce((select sum(amount) from expenses where spent_on < v_to), 0),
+    'prev', jsonb_build_object(
+      'revenue', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= v_prev and paid_date < v_from), 0),
+      'expenses', coalesce((select sum(amount) from expenses where spent_on >= v_prev and spent_on < v_from), 0)),
+    'by_category', (select coalesce(jsonb_agg(jsonb_build_object('category', category, 'total', t, 'count', c) order by t desc), '[]'::jsonb)
+               from (select category, sum(amount) t, count(*) c from expenses where spent_on >= v_from and spent_on < v_to group by category) x),
+    'expense_rows', (select coalesce(jsonb_agg(jsonb_build_object('title', case when category = 'salary' and not v_sal then 'Salaries' else title end,
+                 'category', category, 'amount', amount, 'spent_on', spent_on, 'vendor', vendor,
+                 'payee', case when v_sal then member_name(payee_member) end) order by spent_on, id), '[]'::jsonb)
+               from expenses where spent_on >= v_from and spent_on < v_to),
+    'revenue_rows', (select coalesce(jsonb_agg(jsonb_build_object('client', coalesce(c.name, nullif(i.bill_to ->> 'company', ''), i.bill_to ->> 'name'), 'kind', i.kind, 'invoice', coalesce(i.invoice_number, '#' || i.id), 'amount', i.amount, 'paid_date', i.paid_date) order by i.paid_date), '[]'::jsonb)
+               from invoices i left join clients c on c.id = i.client_id where i.status = 'paid' and i.paid_date >= v_from and i.paid_date < v_to),
+    'investment_rows', (select coalesce(jsonb_agg(jsonb_build_object('source', source, 'kind', kind, 'amount', amount, 'invested_on', invested_on) order by invested_on), '[]'::jsonb)
+               from investments where invested_on >= v_from and invested_on < v_to)
+  ) into r;
+  return r;
+end $$;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.invoice_initials(text, bigint), public.clients_codes_before(), public.invoices_details_before(),
+  public.invoices_log_after(), public.finance_notify() from authenticated;
+grant execute on function public.invoice_next_number(text, bigint), public.name_initials(text), public.num_pad(bigint, int),
+  public.issuer_title(uuid), public.invoice_party(bigint, jsonb), public.finance_report(date) to authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).
+
+
+
+-- =====================================================================
+--  PART 11 — Invoice template (Ecometrix Hub design)
+--  * Billing period on each invoice ("1–31 October 2026").
+--  * Client address, printed under "Billed to".
+--  * Bank / Wise / terms days live in app_settings.invoice_details (jsonb,
+--    no new column needed).
+-- =====================================================================
+alter table public.invoices add column if not exists billing_period text not null default '';
+alter table public.clients add column if not exists address text;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'invoices_billing_period_len') then
+    alter table public.invoices add constraint invoices_billing_period_len check (length(billing_period) <= 80);
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'clients_address_len') then
+    alter table public.clients add constraint clients_address_len check (address is null or length(address) <= 300);
+  end if;
+end $$;
