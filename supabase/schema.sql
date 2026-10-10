@@ -1122,10 +1122,12 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- Names + roles of active members, for pickers and "added by" labels (no emails or phones)
+drop function if exists public.team_directory();
 create or replace function public.team_directory()
-returns table (id uuid, name text, roles text[], status text)
+returns table (id uuid, name text, roles text[], status text, job_title text, department text, is_admin boolean)
 language sql stable security definer set search_path = public as $$
-  select p.id, member_name(p.id), coalesce(array_agg(mr.role_key) filter (where mr.role_key is not null), '{}'), p.status
+  select p.id, member_name(p.id), coalesce(array_agg(mr.role_key) filter (where mr.role_key is not null), '{}'), p.status,
+         p.job_title, p.department, p.role = 'admin'
     from profiles p left join member_roles mr on mr.member_id = p.id
    where auth.uid() is not null and p.status in ('active', 'invited')
    group by p.id;
@@ -1524,6 +1526,13 @@ language sql stable security definer set search_path = public as $$
                    and (t.assigned_to = auth.uid() or is_manager() or (t.client_id is not null and is_client_pm(t.client_id))));
 $$;
 
+-- "Taha Khan (Co-Founder & COO)" — name plus designation, used in notifications
+create or replace function public.member_label(p_id uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select member_name(p.id) || coalesce(' (' || nullif(p.job_title, '') || ')', case when p.role = 'admin' then ' (Admin)' else '' end)
+    from profiles p where p.id = p_id;
+$$;
+
 -- Send a notification (never to the person who caused it, never to inactive accounts)
 create or replace function public.notify(p_user uuid, p_kind text, p_title text, p_body text default '', p_link text default null)
 returns void language plpgsql security definer set search_path = public as $$
@@ -1609,11 +1618,11 @@ declare v_link text := '#/my-tasks'; v_pm uuid;
 begin
   if new.client_id is not null then select project_manager into v_pm from clients where id = new.client_id; end if;
   if tg_op = 'INSERT' then
-    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_name(auth.uid()), 'the admin'), v_link);
+    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_label(auth.uid()), 'the admin'), v_link);
     return new;
   end if;
   if new.assigned_to is distinct from old.assigned_to then
-    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_name(auth.uid()), 'the admin'), v_link);
+    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_label(auth.uid()), 'the admin'), v_link);
   end if;
   if new.status is distinct from old.status then
     if new.status = 'in_review' then
@@ -1798,7 +1807,7 @@ grant update (read_at) on public.notifications to authenticated;
 grant all on public.client_members, public.notifications to service_role;
 
 revoke execute on all functions in schema public from public, anon;
-revoke execute on function public.notify(uuid, text, text, text, text), public.notify_managers(text, text, text, text),
+revoke execute on function public.member_label(uuid), public.notify(uuid, text, text, text, text), public.notify_managers(text, text, text, text),
   public.notify_role(text, text, text, text, text), public.tasks_notify(), public.leads_notify(), public.clients_notify(),
   public.client_members_notify(), public.finance_notify(), public.files_notify() from authenticated;
 grant execute on function public.is_client_pm(bigint), public.is_client_agent(bigint, uuid), public.can_see_task(bigint),

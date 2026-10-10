@@ -6,6 +6,7 @@ import {
 } from '../ui.js';
 import { fmtDate, fmtDateOfIso, fmtDuration, fmtRelative, todayStr, startOfWeek } from '../time.js';
 import { invalidateMembers } from '../task-drawer.js';
+import { DEPARTMENTS, DESIGNATIONS } from '../team-config.js';
 
 export async function render({ el, params }) {
   let members = [];
@@ -62,7 +63,7 @@ export async function render({ el, params }) {
           const p = presence.get(m.id);
           const pr = p?.presence || 'offline';
           return `<tr class="clickable" data-id="${m.id}" tabindex="0">
-            <td>${`<div class="who">${avatar(m)}<div><div class="name">${esc(fullName(m))}</div><div class="sub">${esc(m.email)}</div></div></div>`}</td>
+            <td>${`<div class="who">${avatar(m)}<div><div class="name">${esc(fullName(m))}</div><div class="sub">${esc(m.job_title || m.email)}</div>${m.department ? `<div class="sub">${esc(m.department)}</div>` : ''}</div></div>`}</td>
             <td><div class="chips">${m.roles.map((r) => roleChip(r, state.roles)).join('') || '<span class="muted small">No role</span>'}</div></td>
             <td>${memberBadge(m.status)}</td>
             <td>${m.status === 'invited' ? '<span class="muted small">Not joined yet</span>' : presenceTag(pr, pr === 'offline' ? (p?.last_seen_at ? `Seen ${fmtRelative(p.last_seen_at)}` : 'Offline') : null)}</td>
@@ -111,9 +112,13 @@ export async function render({ el, params }) {
             ${member ? '<span class="hint">Email can\'t be changed after the invite.</span>' : '<span class="hint">They sign in with this email.</span>'}</div>
           <div class="field"><label for="mf-phone">Phone (optional)</label><input id="mf-phone" class="input" value="${esc(m.phone || '')}" maxlength="30"></div>
           <div class="field"><label for="mf-joined">Joining date</label><input id="mf-joined" type="date" class="input" value="${esc(m.joined_on || '')}"></div>
-          <div class="field"><label for="mf-title">Job title (optional)</label><input id="mf-title" class="input" value="${esc(m.job_title || '')}" maxlength="80"></div>
-          <div class="field"><label for="mf-dept">Department (optional)</label><input id="mf-dept" class="input" value="${esc(m.department || '')}" maxlength="80"></div>
-          <div class="field span-2"><span class="label">Roles</span><span class="hint" style="margin-top:-2px">Pick one or more. Each role adds its own tab for this member.</span>
+          <div class="field"><label for="mf-dept">Department</label>
+            <select id="mf-dept" class="select"><option value="">Select department</option>${DEPARTMENTS.map((d) => `<option ${m.department === d.name ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}${m.department && !DEPARTMENTS.some((d) => d.name === m.department) ? `<option selected>${esc(m.department)}</option>` : ''}</select>
+            <span class="hint" id="mf-dept-hint"></span></div>
+          <div class="field"><label for="mf-title">Designation</label>
+            <select id="mf-title" class="select"><option value="">Select designation</option>${DESIGNATIONS.map((t) => `<option ${m.job_title === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__other" ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? 'selected' : ''}>Other</option></select>
+            <input id="mf-title-other" class="input ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? '' : 'hidden'}" style="margin-top:6px" maxlength="80" value="${esc(m.job_title && !DESIGNATIONS.includes(m.job_title) ? m.job_title : '')}" placeholder="Type the designation"></div>
+          <div class="field span-2"><span class="label">Roles</span><span class="hint" style="margin-top:-2px">Pick one or more. Each role adds its own tab. <b>Manager</b> gives full access like the admin (except Settings and Permissions).</span>
             <div class="role-pick">${state.roles.map((r) => `
               <label><input type="checkbox" name="roles" value="${esc(r.key)}" ${m.roles.includes(r.key) ? 'checked' : ''}>
                 <div><b><span class="role-dot" data-role="${esc(r.key)}" style="display:inline-block;margin-right:6px"></span>${esc(r.name)}</b><span>${esc(r.description)}</span></div></label>`).join('')}</div></div>
@@ -121,6 +126,11 @@ export async function render({ el, params }) {
         </form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${member ? 'Save changes' : 'Add and get invite link'}</button>`,
     });
+    const deptSel = modal.querySelector('#mf-dept');
+    const showDept = () => { modal.querySelector('#mf-dept-hint').textContent = DEPARTMENTS.find((d) => d.name === deptSel.value)?.points || ''; };
+    deptSel.addEventListener('change', showDept); showDept();
+    const titleSel = modal.querySelector('#mf-title');
+    titleSel.addEventListener('change', () => { const o = modal.querySelector('#mf-title-other'); o.classList.toggle('hidden', titleSel.value !== '__other'); if (titleSel.value === '__other') o.focus(); });
     const err = modal.querySelector('#mf-err');
     const fail = (msg) => { err.textContent = msg; err.classList.remove('hidden'); };
     modal.querySelector('[data-cancel]').onclick = () => modal.close();
@@ -131,8 +141,8 @@ export async function render({ el, params }) {
         first_name: modal.querySelector('#mf-first').value.trim(),
         last_name: modal.querySelector('#mf-last').value.trim(),
         phone: modal.querySelector('#mf-phone').value.trim(),
-        job_title: modal.querySelector('#mf-title').value.trim(),
-        department: modal.querySelector('#mf-dept').value.trim(),
+        job_title: modal.querySelector('#mf-title').value === '__other' ? modal.querySelector('#mf-title-other').value.trim() : modal.querySelector('#mf-title').value,
+        department: modal.querySelector('#mf-dept').value,
         joined_on: modal.querySelector('#mf-joined').value,
         roles: [...modal.querySelectorAll('input[name=roles]:checked')].map((x) => x.value),
       };

@@ -1,7 +1,7 @@
 // Task detail drawer (admin + member) and the admin task form.
 import { supabase } from './supabase.js';
 import { state, roleName } from './state.js';
-import { q, rpc, TASK_FIELDS, loadTotals, loadMembers, loadDirectory, dirName } from './data.js';
+import { q, rpc, TASK_FIELDS, loadTotals, loadMembers, loadDirectory, dirName, dirLabel } from './data.js';
 import {
   esc, icon, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy, loadingBlock,
   statusBadge, prioTag, roleChip, avatar, fullName, STATUS_LABEL, PRIORITY_LABEL,
@@ -16,6 +16,7 @@ export function openTaskDrawer(taskId) {
   const drawer = openDrawer({ title: 'Task', body: loadingBlock(5), onClose: () => window.removeEventListener('ehos:data-changed', onExternal) });
   let reloading = false;
   let clientRow = null;
+  let dirCache = [];
   const onExternal = () => { if (!reloading) load(); };
   window.addEventListener('ehos:data-changed', onExternal);
 
@@ -37,6 +38,7 @@ export function openTaskDrawer(taskId) {
         drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This task was deleted or is no longer assigned to you.</p>';
         return;
       }
+      dirCache = await loadDirectory().catch(() => []);
       clientRow = task.client_id ? await q(supabase.from('clients').select('id, name, project_manager').eq('id', task.client_id).maybeSingle()).catch(() => null) : null;
       render(task, comments, totals.get(task.id), entries, history, totals.fetchedAt);
     } catch (e) {
@@ -84,6 +86,7 @@ export function openTaskDrawer(taskId) {
       ${banner}
       ${timerBlock}
       <dl class="kv">
+        <dt>Assigned by</dt><dd>${(() => { const l = dirLabel(dirCache, task.created_by, state.roles); return l ? `<div class="who">${avatar({ first_name: l.name.split(' ')[0], last_name: l.name.split(' ')[1] || '' }, 'sm')}<div><div class="name">${esc(l.name)}</div>${l.title ? `<div class="sub">${esc(l.title)}</div>` : ''}</div></div>` : '<span class="muted">—</span>'; })()}</dd>
         <dt>Assigned to</dt><dd>${task.assignee ? `<div class="who">${avatar(task.assignee, 'sm')}<span>${esc(fullName(task.assignee))}</span></div>` : '<span class="muted">Nobody yet</span>'}</dd>
         <dt>Role</dt><dd>${task.team_role ? esc(roleName(task.team_role)) : '<span class="muted">Any role</span>'}</dd>
         ${clientRow ? `<dt>Client</dt><dd>${esc(clientRow.name)}</dd>` : ''}

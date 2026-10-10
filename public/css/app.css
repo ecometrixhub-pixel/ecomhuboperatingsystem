@@ -730,4 +730,10 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 @media (max-width: 900px) {
   .collapse-btn { display: none; }
 }
+@media (max-width: 600px) {
+  .topbar { gap: 6px; }
+  .topbar .spacer { display: none; }
+  .topbar .page-title { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .timer-pill { gap: 6px; padding-left: 10px; }
+  .timer-pill .btn-sm.btn-icon { width: 28px; height: 28px; }
 }

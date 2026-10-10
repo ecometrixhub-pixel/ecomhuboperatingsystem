@@ -1,7 +1,7 @@
 // Member: My tasks, and each role tab (same list filtered by role)
 import { supabase } from '../supabase.js';
 import { state } from '../state.js';
-import { q, TASK_FIELDS, loadTotals } from '../data.js';
+import { q, TASK_FIELDS, loadTotals, loadDirectory, dirLabel } from '../data.js';
 import { esc, icon, statusBadge, prioTag, roleChip, emptyState, loadingBlock, on, ROLE_ICONS } from '../ui.js';
 import { fmtDuration, dueLabel, dueState } from '../time.js';
 import { liveAttrs, startTimer, pauseTimer, timerStateFor, onTimerChange } from '../timer.js';
@@ -15,7 +15,7 @@ export async function render({ el, arg: role, setTitle }) {
   const r = role ? state.roles.find((x) => x.key === role) : null;
   if (r) setTitle(r.name);
   let filter = 'open';
-  let tasks = []; let totals = new Map();
+  let tasks = []; let totals = new Map(); let dir = [];
 
   el.innerHTML = `
     <div class="page-head">
@@ -69,6 +69,7 @@ export async function render({ el, arg: role, setTitle }) {
             <div class="meta">${statusBadge(t.status)}${prioTag(t.priority)}${!role && t.team_role ? roleChip(t.team_role, state.roles) : ''}
               ${t.due_date && t.status !== 'completed' ? `<span class="due ${due}">${icon('calendar', 12)}${esc(dueLabel(t.due_date))}</span>` : ''}
               ${total || ts === 'running' ? `<span class="tracked ${ts === 'running' ? 'live' : ''}">${icon('clock', 12)}<span ${ts === 'running' ? liveAttrs(total, totals.fetchedAt) : ''}>${fmtDuration(total)}</span></span>` : ''}
+              ${(() => { const l = dirLabel(dir, t.created_by, state.roles); return l ? `<span>By ${esc(l.name)}${l.title ? `, ${esc(l.title)}` : ''}</span>` : ''; })()}
               ${t.status === 'in_progress' && t.review_note ? '<span class="due soon">Changes requested</span>' : ''}
             </div>
           </div>
@@ -80,7 +81,7 @@ export async function render({ el, arg: role, setTitle }) {
   async function load() {
     let query = supabase.from('tasks').select(TASK_FIELDS).eq('assigned_to', state.profile.id).order('created_at', { ascending: false });
     if (role) query = query.eq('team_role', role);
-    tasks = await q(query);
+    [tasks, dir] = await Promise.all([q(query), loadDirectory().catch(() => [])]);
     totals = await loadTotals(tasks.map((t) => t.id));
     draw();
   }

@@ -74,3 +74,10 @@ export async function loadDirectory(force = false) {
   return dirCache;
 }
 export const dirName = (dir, id) => dir.find((d) => d.id === id)?.name || '';
+// "Taha Khan · Co-Founder & COO" style label: name + designation (or Admin / team roles)
+export function dirLabel(dir, id, roles = []) {
+  const d = dir.find((x) => x.id === id);
+  if (!d) return '';
+  const title = d.job_title || (d.is_admin ? 'Admin' : d.roles.map((k) => roles.find((r) => r.key === k)?.name || k).join(', '));
+  return { name: d.name, title };
+}
