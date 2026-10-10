@@ -572,5 +572,70 @@ await as(MG, async () => {
   ok(o.monthly_fixed !== undefined, 'overview still works with one-time bills');
 });
 
+
+console.log('Part 10: invoices v2 (BUID, auto numbers, items, business invoices)');
+{
+  const cl = await q(`select name, buid, invoice_code from clients order by id`);
+  ok(cl.every((c) => /^BUID-\d{4,}$/.test(c.buid)) && new Set(cl.map((c) => c.buid)).size === cl.length, 'every client has a unique BUID (' + cl.map((c) => c.buid).join(', ') + ')');
+  ok(cl[0].buid === 'BUID-1001', 'BUIDs start at 1001');
+  await q(`update profiles set job_title='Co-Founder' where id=$1`, [MG]);
+  const mk = (name) => as(MG, async () => (await q(`insert into clients (name, buid, invoice_code) values ($1, 'BUID-1', 'ZZ') returning id, buid, invoice_code`, [name]))[0]);
+  const hf = await mk('Him Fashions');
+  ok(hf.invoice_code === 'HF' && hf.buid !== 'BUID-1', 'two words → first letters (HF), BUID can\'t be typed in');
+  const hf2 = await mk('Hira Foods');
+  ok(hf2.invoice_code === 'HS', 'same initials → another code from the name (Hira Foods → ' + hf2.invoice_code + ')');
+  const gl = await mk('Glowza');
+  ok(gl.invoice_code === 'GA', 'one word → first and last letter (' + gl.invoice_code + ')');
+  await as(MG, () => q(`update clients set name='Him Fashion House', invoice_code='QQ' where id=$1`, [hf.id]));
+  ok((await q(`select invoice_code, buid from clients where id=$1`, [hf.id]))[0].invoice_code === 'HF', 'code and BUID never change after renaming');
+
+  await as(FN, async () => {
+    ok((await q(`select invoice_next_number('client', $1) n`, [hf.id]))[0].n === 'INV-BUID-HF001', 'next number preview');
+    const [i1] = await q(`insert into invoices (client_id, items, issue_date) values ($1, '[{"description":"Meta ads management","qty":1,"rate":500},{"description":"Creatives","qty":4,"rate":25}]', '2026-10-10') returning *`, [hf.id]);
+    ok(i1.invoice_number === 'INV-BUID-HF001', 'first invoice INV-BUID-HF001');
+    ok(Number(i1.amount) === 600 && i1.currency === 'USD' && i1.description === 'Meta ads management', 'total from line items (600), app currency, description from first line');
+    ok(/^REF-261010-\d{4}$/.test(i1.reference_no), 'reference number auto (' + i1.reference_no + ')');
+    ok(i1.issued_by === FN && i1.issued_by_name && i1.issued_by_title === 'Finance', 'issued by the creator, with their role (' + i1.issued_by_title + ')');
+    const [i2] = await q(`insert into invoices (client_id, invoice_number, currency, fx_rate, items, tax_percent, discount) values ($1, '', 'GBP', 1.3, '[{"description":"SEO","qty":2,"rate":100}]', 10, 20) returning *`, [hf.id]);
+    ok(i2.invoice_number === 'INV-BUID-HF002' && Number(i2.amount_original) === 198 && Number(i2.amount) === 257.4, 'second invoice HF002; discount then tax; GBP converted (' + i2.amount + ')');
+    await q(`update invoices set invoice_number='HACK', reference_no='X', issued_by=$2, kind='business', status='paid' where id=$1`, [i1.id, SR]);
+    const [u] = await q(`select invoice_number, reference_no, issued_by, kind, status from invoices where id=$1`, [i1.id]);
+    ok(u.invoice_number === 'INV-BUID-HF001' && u.reference_no === i1.reference_no && u.issued_by === FN && u.kind === 'client' && u.status === 'paid', 'number, reference, issuer and type are locked');
+    const [i3] = await q(`insert into invoices (client_id, amount) values ($1, 50) returning invoice_number`, [hf2.id]);
+    ok(i3.invoice_number === 'INV-BUID-HS001', 'each business has its own counter');
+    await expectErr(() => q(`insert into invoices (client_id, items) values ($1, '[{"description":"","rate":5}]')`, [hf.id]), 'line needs a description', /description/);
+    await expectErr(() => q(`insert into invoices (client_id, items, discount) values ($1, '[{"description":"x","rate":5}]', 10)`, [hf.id]), 'discount can\'t beat the total', /discount/);
+    await expectErr(() => q(`insert into invoices (amount) values (5)`), 'client invoice needs a client', /client/i);
+
+    const [b1] = await q(`insert into invoices (kind, client_id, bill_to, items) values ('business', $1, '{"name":"Ali Raza","company":"Raza Traders","email":"ali@raza.pk"}', '[{"description":"Logo design","qty":1,"rate":150}]') returning *`, [hf.id]);
+    ok(b1.invoice_number === 'INV-EH001' && b1.client_id === null && b1.kind === 'business', 'business invoice INV-EH001, not tied to a client');
+    ok((await q(`select invoice_next_number('business') n`))[0].n === 'INV-EH002', 'business next number');
+    await expectErr(() => q(`insert into invoices (kind, items) values ('business', '[{"description":"x","rate":5}]')`), 'business invoice needs a name', /who this invoice/);
+  });
+  await as(MG, async () => {
+    const [b2] = await q(`insert into invoices (kind, bill_to, amount) values ('business', '{"name":"Walk-in"}', 80) returning invoice_number, issued_by_name, issued_by_title`);
+    ok(b2.invoice_number === 'INV-EH002' && b2.issued_by_title === 'Co-Founder', 'issued by shows the designation (' + b2.issued_by_name + ', ' + b2.issued_by_title + ')');
+  });
+  ok((await notes(A)).some((t) => t.startsWith('New invoice for Raza Traders')), 'business invoice notifies with the customer name');
+  await as(SR, async () => ok((await q(`select count(*)::int c from invoices where kind='business'`))[0].c === 0, 'sales rep can\'t see business invoices'));
+  await as(PM1, async () => ok((await q(`select count(*)::int c from invoices where kind='business'`))[0].c === 0, 'project manager can\'t see business invoices'));
+  await as(SR, () => expectErr(() => q(`select invoice_next_number('business')`), 'no number preview without finance access', /permission/));
+  await as(FN, async () => ok((await q(`select count(*)::int c from invoice_counters`).catch(() => [{ c: -1 }]))[0].c === -1, 'counters are not readable from the browser'));
+  ok((await q(`select count(*)::int c from activity_logs where action='invoice_created' and description like '%Raza Traders%'`))[0].c === 1, 'business invoice logged');
+  await as(MG, async () => { const r = (await q(`select finance_report(current_date) r`))[0].r; ok(Array.isArray(r.revenue_rows), 'monthly report still works'); });
+}
+
+console.log('Part 11: invoice template fields');
+{
+  const [c] = await as(MG, () => q(`insert into clients (name, address, country) values ('Template Co', '12 High St, London', 'UK') returning id, address`));
+  ok(c.address === '12 High St, London', 'client address saved');
+  await as(FN, async () => {
+    const [i] = await q(`insert into invoices (client_id, billing_period, items) values ($1, '1–31 October 2026', '[{"description":"Paid ads","qty":1,"rate":400}]') returning billing_period, invoice_number, issued_by_name`, [c.id]);
+    ok(i.billing_period === '1–31 October 2026' && /^INV-BUID-TC\d{3}$/.test(i.invoice_number), 'billing period stored, number auto (' + i.invoice_number + ')');
+    await expectErr(() => q(`insert into invoices (client_id, billing_period, amount) values ($1, $2, 5)`, [c.id, 'x'.repeat(81)]), 'billing period length limit', /billing_period/);
+  });
+  await as(SR, async () => ok((await q(`select count(*)::int c from invoices where billing_period <> ''`))[0].c === 0, 'sales rep still can\'t see invoices'));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

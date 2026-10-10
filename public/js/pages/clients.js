@@ -5,14 +5,14 @@ import { q, loadDirectory, dirName } from '../data.js';
 import { esc, icon, emptyState, loadingBlock, on, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy } from '../ui.js';
 import { fmtDate, fmtDateOfIso, todayStr, daysBetween, dueLabel, dueState } from '../time.js';
 import { statusBadge, prioTag } from '../ui.js';
+import { INVOICE_STATUS, invoiceState, invoiceBadge, invAmount, openInvoiceEditor, openInvoiceView } from '../invoices.js';
+
+export { INVOICE_STATUS, invoiceState, invoiceBadge };
 
 export const CLIENT_STATUS = { onboarding: 'Onboarding', active: 'Active', paused: 'Paused', churned: 'Churned' };
-export const INVOICE_STATUS = { draft: 'Draft', sent: 'Unpaid', paid: 'Paid', cancelled: 'Cancelled' };
 const FILE_KINDS = { contract: 'Contract', document: 'Document', invoice: 'Invoice PDF', other: 'Other' };
 const changed = () => window.dispatchEvent(new CustomEvent('ehos:data-changed'));
 export const clientBadge = (s) => `<span class="badge ${esc(s)}">${esc(CLIENT_STATUS[s] || s)}</span>`;
-export const invoiceState = (inv) => (inv.status === 'sent' && inv.due_date && inv.due_date < todayStr() ? 'overdue' : inv.status);
-export const invoiceBadge = (inv) => { const s = invoiceState(inv); return `<span class="badge ${s}">${s === 'overdue' ? `Overdue ${daysBetween(inv.due_date, todayStr())}d` : INVOICE_STATUS[s]}</span>`; };
 const isPM = (c) => c.project_manager === state.profile.id;
 const canEditClient = (c) => can('clients', 'edit') || (isPM(c) && state.pmPerms.clients?.edit);
 const canDeleteClient = (c) => can('clients', 'delete') || (isPM(c) && state.pmPerms.clients?.delete);
@@ -48,7 +48,7 @@ export async function render({ el, params }) {
       `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${k === 'all' ? clients.length : clients.filter((c) => c.status === k).length}</span></button>`).join('');
     const s = search.toLowerCase();
     const list = clients.filter((c) => (status === 'all' || c.status === status)
-      && (!s || `${c.name} ${c.contact_name || ''} ${c.email || ''}`.toLowerCase().includes(s)));
+      && (!s || `${c.name} ${c.buid || ''} ${c.contact_name || ''} ${c.email || ''}`.toLowerCase().includes(s)));
     if (!clients.length) {
       table.innerHTML = emptyState(onlyMine ? 'No clients assigned to you yet' : 'No clients yet', onlyMine ? 'When you run or join a project, its client shows up here.' : 'Mark a lead as won, or add a client directly.', can('clients', 'edit') ? '<button class="btn btn-primary" data-new>New client</button>' : '');
       return;
@@ -57,7 +57,7 @@ export async function render({ el, params }) {
     table.innerHTML = `<table class="table">
       <thead><tr><th>Client</th><th>Status</th><th>Onboarded</th><th>Projects</th><th class="r">Retainer / mo</th>${showMoney ? '<th class="r">Revenue</th><th class="r">Unpaid</th>' : ''}</tr></thead>
       <tbody>${list.map((c) => { const m = sums(c.id); return `<tr class="clickable" data-id="${c.id}" tabindex="0">
-        <td><div style="font-weight:500">${esc(c.name)}</div><div class="small muted">${esc([c.contact_name, c.country].filter(Boolean).join(', ') || '—')}</div></td>
+        <td><div style="font-weight:500">${esc(c.name)}${c.buid ? ` <span class="inv-buid-chip">${esc(c.buid)}</span>` : ''}</div><div class="small muted">${esc([c.contact_name, c.country].filter(Boolean).join(', ') || '—')}</div></td>
         <td>${clientBadge(c.status)}</td>
         <td class="small">${esc(fmtDate(c.onboarding_date))}</td>
         <td class="small">${(() => { const ps = projects.filter((x) => x.client_id === c.id); return ps.length ? `${ps.length} ${ps.length === 1 ? 'project' : 'projects'}<div class="muted">${esc([...new Set(ps.map((x) => dirName(dir, x.project_manager)).filter(Boolean))].join(', ') || 'No PM yet')}</div>` : '<span class="muted">No project yet</span>'; })()}</td>
@@ -104,6 +104,7 @@ export async function openClientForm(client = null) {
         <div class="field"><label for="cf-email">Email</label><input id="cf-email" class="input" type="email" maxlength="160" value="${esc(c.email || '')}"></div>
         <div class="field"><label for="cf-phone">Phone / WhatsApp</label><input id="cf-phone" class="input" maxlength="40" value="${esc(c.phone || '')}"></div>
         <div class="field"><label for="cf-web">Website / store</label><input id="cf-web" class="input" maxlength="200" value="${esc(c.website || '')}"></div>
+        <div class="field span-2"><label for="cf-address">Address</label><input id="cf-address" class="input" maxlength="300" value="${esc(c.address || '')}" placeholder="Street, city — printed on invoices"></div>
         <div class="field"><label for="cf-country">Country</label><input id="cf-country" class="input" maxlength="60" value="${esc(c.country || '')}"></div>
         <div class="field"><label for="cf-date">Onboarding date</label><input id="cf-date" class="input" type="date" value="${esc(c.onboarding_date || '')}"></div>
         <div class="field"><label for="cf-status">Status</label><select id="cf-status" class="select">${Object.entries(CLIENT_STATUS).map(([k, v]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
@@ -121,7 +122,7 @@ export async function openClientForm(client = null) {
     const v = (id) => m.querySelector(id).value.trim();
     const payload = {
       name: v('#cf-name'), contact_name: v('#cf-contact') || null, email: v('#cf-email') || null, phone: v('#cf-phone') || null,
-      website: v('#cf-web') || null, country: v('#cf-country') || null, onboarding_date: v('#cf-date') || null, status: v('#cf-status'),
+      website: v('#cf-web') || null, address: v('#cf-address') || null, country: v('#cf-country') || null, onboarding_date: v('#cf-date') || null, status: v('#cf-status'),
       monthly_retainer: v('#cf-ret') === '' ? null : Number(v('#cf-ret')), services: v('#cf-services') || null, notes: v('#cf-notes'),
     };
     if (!payload.name) { err.textContent = 'Enter the client name.'; err.classList.remove('hidden'); return; }
@@ -142,50 +143,9 @@ export async function openClientForm(client = null) {
   m.querySelector('#cf').addEventListener('submit', (e) => { e.preventDefault(); submit(); });
 }
 
-// ---------- Invoice form ----------
-export async function openInvoiceForm({ clientId = null, projectId = null, invoice = null } = {}) {
-  const clients = clientId ? [] : await q(supabase.from('clients').select('id, name').order('name'));
-  const projects = clientId && !projectId ? await q(supabase.from('projects').select('id, name').eq('client_id', clientId).order('name')).catch(() => []) : [];
-  const i = invoice || { invoice_number: '', description: '', amount: '', issue_date: todayStr(), due_date: '', status: 'sent', project_id: projectId };
-  const m = openModal({
-    title: invoice ? 'Edit invoice' : 'New invoice',
-    body: `
-      <form id="inf" class="form-grid" novalidate>
-        ${clientId ? '' : `<div class="field span-2"><label for="in-client">Client</label><select id="in-client" class="select"><option value="">Choose a client</option>${clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>`}
-        <div class="field"><label for="in-num">Invoice number</label><input id="in-num" class="input" maxlength="40" value="${esc(i.invoice_number || '')}" placeholder="INV-1001"></div>
-        <div class="field"><label for="in-amount">Amount (${esc(state.settings.currency || 'USD')})</label><input id="in-amount" class="input" type="number" min="0" step="0.01" value="${esc(i.amount)}"></div>
-        <div class="field"><label for="in-issue">Issue date</label><input id="in-issue" class="input" type="date" value="${esc(i.issue_date || '')}"></div>
-        <div class="field"><label for="in-due">Due date</label><input id="in-due" class="input" type="date" value="${esc(i.due_date || '')}"></div>
-        <div class="field span-2"><label for="in-status">Status</label><select id="in-status" class="select">${Object.entries(INVOICE_STATUS).map(([k, v]) => `<option value="${k}" ${i.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-        ${projects.length ? `<div class="field span-2"><label for="in-project">Project</label><select id="in-project" class="select"><option value="">Whole client (no project)</option>${projects.map((p) => `<option value="${p.id}" ${i.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-          <span class="hint">The project manager of that project can see this invoice.</span></div>` : ''}
-        <div class="field span-2"><label for="in-desc">Description</label><input id="in-desc" class="input" maxlength="300" value="${esc(i.description || '')}" placeholder="October retainer, Meta ads management"></div>
-        <div class="form-error hidden span-2" id="in-err"></div>
-      </form>`,
-    foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${invoice ? 'Save invoice' : 'Add invoice'}</button>`,
-  });
-  m.querySelector('[data-cancel]').onclick = () => m.close();
-  const err = m.querySelector('#in-err'); const save = m.querySelector('[data-save]');
-  const submit = () => busy(save, async () => {
-    err.classList.add('hidden');
-    const v = (id) => m.querySelector(id)?.value.trim();
-    const payload = {
-      invoice_number: v('#in-num') || null, amount: Number(v('#in-amount')), issue_date: v('#in-issue') || todayStr(),
-      due_date: v('#in-due') || null, status: v('#in-status'), description: v('#in-desc') || '',
-    };
-    const cid = clientId || Number(v('#in-client'));
-    if (projectId) payload.project_id = projectId;
-    else if (m.querySelector('#in-project')) payload.project_id = Number(v('#in-project')) || null;
-    if (!cid) { err.textContent = 'Choose a client.'; err.classList.remove('hidden'); return; }
-    if (!(payload.amount >= 0) || v('#in-amount') === '') { err.textContent = 'Enter the amount.'; err.classList.remove('hidden'); return; }
-    try {
-      if (invoice) await q(supabase.from('invoices').update(payload).eq('id', invoice.id));
-      else await q(supabase.from('invoices').insert({ ...payload, client_id: cid }));
-      toast(invoice ? 'Invoice saved' : 'Invoice added'); m.close(); changed();
-    } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
-  });
-  save.onclick = submit;
-  m.querySelector('#inf').addEventListener('submit', (e) => { e.preventDefault(); submit(); });
+// ---------- Invoice form (kept for older callers; the editor lives in ../invoices.js) ----------
+export function openInvoiceForm({ clientId = null, projectId = null, invoice = null } = {}) {
+  return openInvoiceEditor({ kind: 'client', clientId, projectId, invoice });
 }
 
 // ---------- Client drawer ----------
@@ -218,18 +178,20 @@ export function openClientDrawer(id, tab = 'overview') {
     let content = '';
     if (tab === 'overview') {
       content = `
-        <div class="row wrap">${clientBadge(c.status)}${c.monthly_retainer ? `<span class="chip">${money(c.monthly_retainer)} / mo</span>` : ''}</div>
+        <div class="row wrap">${clientBadge(c.status)}${c.buid ? `<span class="inv-buid-chip" title="Business ID — used in invoice numbers">${esc(c.buid)}</span>` : ''}${c.monthly_retainer ? `<span class="chip">${money(c.monthly_retainer)} / mo</span>` : ''}</div>
         ${showInv ? `<div class="stats"><div class="stat-group">
           <div class="stat"><div class="v" style="font-size:19px;color:#15803D">${money(paid)}</div><div class="k">Revenue</div></div>
           <div class="stat"><div class="v" style="font-size:19px">${money(due)}</div><div class="k">Unpaid</div></div>
           <div class="stat"><div class="v" style="font-size:19px">${invoices.length}</div><div class="k">Invoices</div></div></div></div>` : ''}
         <dl class="kv">
           <dt>Onboarding date</dt><dd>${esc(fmtDate(c.onboarding_date))}</dd>
+          ${c.buid ? `<dt>Business ID</dt><dd>${esc(c.buid)} <span class="muted small">· invoices ${esc(`INV-BUID-${c.invoice_code || ''}001…`)}</span></dd>` : ''}
           <dt>Projects</dt><dd>${projects.length ? projects.map((x) => `${esc(x.name)} <span class="muted small">(${esc(dirName(dir, x.project_manager) || 'no PM yet')})</span>`).join('<br>') : 'None yet'}</dd>
           <dt>Contact</dt><dd>${esc(c.contact_name || '—')}</dd>
           <dt>Email</dt><dd>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '—'}</dd>
           <dt>Phone</dt><dd>${esc(c.phone || '—')}</dd>
           <dt>Website</dt><dd>${c.website ? `<a href="${esc(/^https?:/.test(c.website) ? c.website : 'https://' + c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : '—'}</dd>
+          <dt>Address</dt><dd>${esc(c.address || '—')}</dd>
           <dt>Country</dt><dd>${esc(c.country || '—')}</dd>
           <dt>Services</dt><dd>${esc(c.services || '—')}</dd>
           <dt>Client since</dt><dd>${esc(fmtDateOfIso(c.created_at))}${c.lead_id ? ' (from a won lead)' : ''}</dd>
@@ -254,8 +216,8 @@ export function openClientDrawer(id, tab = 'overview') {
       content = `
         <div class="section-title">Invoices <span class="row">${canInv(c, 'edit') ? `<button class="btn btn-sm btn-primary" data-new-inv>${icon('plus', 13)}New invoice</button>` : ''}</span></div>
         ${invoices.length ? `<div class="panel"><div class="list">${invoices.map((i) => `
-          <div class="list-item" style="padding:11px 14px">
-            <div class="grow"><div class="title">${esc(i.invoice_number || `Invoice #${i.id}`)} <span class="money" style="font-weight:600;margin-left:6px">${money(i.amount)}</span></div>
+          <div class="list-item clickable" style="padding:11px 14px" data-view-inv="${i.id}">
+            <div class="grow"><div class="title">${esc(i.invoice_number || `Invoice #${i.id}`)} <span class="money" style="font-weight:600;margin-left:6px">${invAmount(i)}</span></div>
               <div class="meta"><span>Issued ${esc(fmtDate(i.issue_date))}</span>${i.due_date ? `<span>Due ${esc(fmtDate(i.due_date))}</span>` : ''}${i.paid_date ? `<span>Paid ${esc(fmtDate(i.paid_date))}</span>` : ''}${i.description ? `<span>${esc(i.description)}</span>` : ''}${i.project_id ? `<span>${icon('folder', 11)} ${esc(projName(i.project_id))}</span>` : ''}</div></div>
             ${invoiceBadge(i)}
             ${canInv(c, 'edit') && i.status === 'sent' ? `<button class="btn btn-sm" data-paid="${i.id}">${icon('check', 13)}Mark paid</button>` : ''}
@@ -298,11 +260,13 @@ export function openClientDrawer(id, tab = 'overview') {
       openTaskForm({ clientId: id, clientName: c.name, presetMember: b.dataset.assign || null, onSaved: () => { tab = 'tasks'; changed(); } });
     });
     body.querySelectorAll('[data-task]').forEach((x) => x.onclick = async () => { const { openTaskDrawer } = await import('../task-drawer.js'); openTaskDrawer(Number(x.dataset.task)); });
-    body.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = () => openInvoiceForm({ clientId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }));
-    body.querySelectorAll('[data-paid]').forEach((b) => b.onclick = () => busy(b, async () => {
+    body.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = (e) => { e.stopPropagation(); openInvoiceForm({ clientId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }); });
+    body.querySelectorAll('[data-view-inv]').forEach((x) => x.onclick = (e) => { if (!e.target.closest('button')) openInvoiceView(Number(x.dataset.viewInv)); });
+    body.querySelectorAll('[data-paid]').forEach((b) => b.onclick = (e) => busy(b, async () => {
       try { await q(supabase.from('invoices').update({ status: 'paid' }).eq('id', Number(b.dataset.paid))); toast('Marked as paid'); changed(); } catch (e) { toast(e.message, 'error'); }
     }));
-    body.querySelectorAll('[data-del-inv]').forEach((b) => b.onclick = async () => {
+    body.querySelectorAll('[data-del-inv]').forEach((b) => b.onclick = async (e) => {
+      e.stopPropagation();
       if (!await confirmDialog({ title: 'Delete this invoice?', text: 'It stops counting toward revenue.', confirm: 'Delete invoice', danger: true })) return;
       try { await q(supabase.from('invoices').delete().eq('id', Number(b.dataset.delInv))); toast('Invoice deleted'); changed(); } catch (e) { toast(e.message, 'error'); }
     });

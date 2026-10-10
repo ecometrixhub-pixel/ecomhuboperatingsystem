@@ -263,7 +263,7 @@ export async function render({ el, arg, params, setTitle }) {
         <section class="panel"><div class="panel-head"><h2>Invoices</h2>${canInvP(p, 'edit') ? `<button class="btn btn-sm btn-primary" data-new-inv>${icon('plus', 13)}New invoice</button>` : ''}</div>
         ${invoices.length ? `<div class="list">${invoices.map((i) => `
           <div class="list-item" style="padding:11px 16px;flex-wrap:wrap">
-            <div class="grow" style="min-width:180px"><div class="title">${esc(i.invoice_number || `Invoice #${i.id}`)} <span class="money" style="font-weight:600;margin-left:6px">${money(i.amount)}</span></div>
+            <div class="grow" style="min-width:180px"><div class="title"><button type="button" class="linkish" data-view-inv="${i.id}">${esc(i.invoice_number || `Invoice #${i.id}`)}</button> <span class="money" style="font-weight:600;margin-left:6px">${money(i.amount)}</span></div>
               <div class="meta"><span>Issued ${esc(fmtDate(i.issue_date))}</span>${i.due_date ? `<span>Due ${esc(fmtDate(i.due_date))}</span>` : ''}${i.paid_date ? `<span>Paid ${esc(fmtDate(i.paid_date))}</span>` : ''}${i.description ? `<span>${esc(i.description)}</span>` : ''}</div></div>
             <span class="badge ${i.status === 'sent' && i.due_date && i.due_date < todayStr() ? 'overdue' : esc(i.status)}">${i.status === 'sent' ? (i.due_date && i.due_date < todayStr() ? 'Overdue' : 'Unpaid') : esc(i.status[0].toUpperCase() + i.status.slice(1))}</span>
             ${canInvP(p, 'edit') && i.status === 'sent' ? `<button class="btn btn-sm" data-paid="${i.id}">${icon('check', 13)}Mark paid</button>` : ''}
@@ -403,6 +403,7 @@ export async function render({ el, arg, params, setTitle }) {
 
       // finances
       el.querySelector('[data-new-inv]')?.addEventListener('click', async () => (await import('./clients.js')).openInvoiceForm({ clientId: p.client_id, projectId: id }));
+      el.querySelectorAll('[data-view-inv]').forEach((b) => b.onclick = async () => (await import('../invoices.js')).openInvoiceView(Number(b.dataset.viewInv)));
       el.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = async () => (await import('./clients.js')).openInvoiceForm({ clientId: p.client_id, projectId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }));
       el.querySelectorAll('[data-paid]').forEach((b) => b.onclick = () => busy(b, async () => {
         try { await q(supabase.from('invoices').update({ status: 'paid' }).eq('id', Number(b.dataset.paid))); toast('Marked as paid'); changed(); } catch (e) { toast(e.message, 'error'); }
