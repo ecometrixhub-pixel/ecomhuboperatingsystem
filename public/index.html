@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EcomHub OS</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <script>
+    // Invite / reset links that land on the home page go to the password page
+    var h = location.hash;
+    location.replace((/type=(invite|recovery)|error_code=/.test(h) ? '/set-password.html' : '/app.html') + h);
+  </script>
+</head>
+<body></body>
+</html>

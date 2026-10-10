@@ -1,0 +1,176 @@
+// App shell: boot, role-based navigation, hash router.
+import { supabase } from './supabase.js';
+import { state } from './state.js';
+import { q } from './data.js';
+import { setTimezone } from './time.js';
+import { startTracking, endTracking } from './tracker.js';
+import { refreshTimer, mountTimerPill } from './timer.js';
+import { esc, icon, avatar, fullName, closeDrawer, ROLE_ICONS, toast } from './ui.js';
+
+const ADMIN_NAV = [
+  { route: 'dashboard', label: 'Dashboard', icon: 'dashboard', page: 'admin-dashboard' },
+  { route: 'team', label: 'Team', icon: 'users', page: 'team' },
+  { route: 'tasks', label: 'Tasks', icon: 'tasks', page: 'tasks' },
+  { route: 'tracking', label: 'Work tracking', icon: 'chart', page: 'tracking' },
+  { route: 'logins', label: 'Login history', icon: 'login', page: 'logins' },
+  { route: 'logs', label: 'Activity logs', icon: 'activity', page: 'logs' },
+  { route: 'settings', label: 'Settings', icon: 'settings', page: 'settings' },
+];
+const MEMBER_NAV = [
+  { route: 'home', label: 'Dashboard', icon: 'home', page: 'member-home' },
+  { route: 'my-tasks', label: 'My tasks', icon: 'tasks', page: 'my-tasks' },
+  { route: 'my-time', label: 'My work time', icon: 'clock', page: 'tracking' },
+  { route: 'my-activity', label: 'My activity', icon: 'activity', page: 'my-activity' },
+  { route: 'profile', label: 'Profile', icon: 'user', page: 'profile' },
+];
+
+let signingOut = false;
+let cleanup = null;
+
+async function boot() {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return location.replace('/login.html');
+  state.user = session.user;
+
+  const [profile, roles, settings] = await Promise.all([
+    q(supabase.from('profiles').select('*, member_roles(role_key)').eq('id', session.user.id).maybeSingle()),
+    q(supabase.from('team_roles').select('*').order('sort')),
+    q(supabase.from('app_settings').select('*').eq('id', 1).maybeSingle()),
+  ]);
+  if (!profile) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
+  if (['inactive', 'suspended'].includes(profile.status)) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
+
+  state.profile = profile;
+  state.myRoles = (profile.member_roles || []).map((r) => r.role_key).sort((a, b) => roles.findIndex((x) => x.key === a) - roles.findIndex((x) => x.key === b));
+  state.roles = roles;
+  state.settings = settings || { timezone: 'Asia/Karachi', idle_minutes: 5, company_name: 'Ecometrix Hub' };
+  state.isAdmin = profile.role === 'admin';
+  setTimezone(state.settings.timezone);
+
+  let fresh = false;
+  try { fresh = sessionStorage.getItem('ehos.fresh') === '1'; sessionStorage.removeItem('ehos.fresh'); } catch { /* ignore */ }
+  await startTracking({ userId: profile.id, idleMinutes: state.settings.idle_minutes, via: fresh ? 'login' : 'resume' });
+  if (profile.status === 'invited') state.profile.status = 'active';
+
+  renderShell();
+  await refreshTimer();
+  window.addEventListener('hashchange', route);
+  route();
+
+  supabase.auth.onAuthStateChange((event) => {
+    if (event === 'SIGNED_OUT' && !signingOut) location.replace('/login.html?msg=expired');
+  });
+  window.addEventListener('ehos:account-inactive', async () => {
+    signingOut = true;
+    await supabase.auth.signOut();
+    location.replace('/login.html?msg=inactive');
+  });
+  // keep the timer pill honest if the server paused it (e.g. after a long sleep)
+  setInterval(refreshTimer, 60_000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshTimer(); });
+}
+
+function navItems() {
+  return state.isAdmin ? ADMIN_NAV : MEMBER_NAV;
+}
+
+function renderShell() {
+  const p = state.profile;
+  const nav = navItems();
+  const roleLinks = !state.isAdmin && state.myRoles.length ? `
+    <div class="nav-title">My roles</div>
+    ${state.myRoles.map((key) => {
+      const r = state.roles.find((x) => x.key === key);
+      return `<a href="#/role/${esc(key)}" data-route="role/${esc(key)}">${icon(ROLE_ICONS[key] || 'briefcase')}<span style="flex:1">${esc(r?.name || key)}</span><span class="role-dot" data-role="${esc(key)}"></span></a>`;
+    }).join('')}` : '';
+
+  document.getElementById('app').innerHTML = `
+    <div class="shell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <div class="brand">
+          <div class="brand-mark">EH</div>
+          <div class="brand-name">EcomHub OS<small>${esc(state.settings.company_name || 'Ecometrix Hub')}</small></div>
+        </div>
+        <nav class="nav">
+          ${nav.map((n) => `<a href="#/${n.route}" data-route="${n.route}">${icon(n.icon)}<span>${n.label}</span></a>`).join('')}
+          ${roleLinks}
+        </nav>
+        <div class="sidebar-foot">
+          <p class="tracking-note">${icon('shield', 13)}<span>Sign-ins, active time and task timers are recorded. ${state.isAdmin ? '' : '<a href="#/my-activity">See your records</a>'}</span></p>
+          <div class="me">
+            <div class="who">${avatar(p)}<div><div class="name">${esc(fullName(p))}</div><div class="sub">${state.isAdmin ? 'Admin' : esc(p.job_title || 'Team member')}</div></div></div>
+            <button class="btn btn-ghost btn-icon btn-sm" id="signout" title="Sign out" aria-label="Sign out">${icon('logout')}</button>
+          </div>
+        </div>
+      </aside>
+      <div class="main">
+        <header class="topbar">
+          <button class="btn btn-ghost btn-icon menu-btn" id="menu" aria-label="Open menu">${icon('menu', 18)}</button>
+          <div class="page-title" id="page-title"></div>
+          <div class="spacer"></div>
+          <div id="timer-slot"></div>
+        </header>
+        <main class="content" id="content"></main>
+      </div>
+    </div>`;
+
+  const shell = document.querySelector('.shell');
+  document.getElementById('menu').onclick = () => shell.classList.toggle('nav-open');
+  shell.addEventListener('click', (e) => {
+    if (shell.classList.contains('nav-open') && (e.target.closest('.nav a') || e.target === shell)) shell.classList.remove('nav-open');
+  });
+  document.getElementById('signout').onclick = signOut;
+  mountTimerPill(document.getElementById('timer-slot'), async (taskId) => {
+    const { openTaskDrawer } = await import('./task-drawer.js');
+    openTaskDrawer(taskId);
+  });
+}
+
+async function signOut() {
+  signingOut = true;
+  const btn = document.getElementById('signout');
+  btn.disabled = true;
+  await endTracking();
+  await supabase.auth.signOut();
+  location.replace('/login.html?msg=signedout');
+}
+
+async function route() {
+  const raw = location.hash.replace(/^#\/?/, '');
+  const [path, query = ''] = raw.split('?');
+  const params = new URLSearchParams(query);
+  const nav = navItems();
+  let item = nav.find((n) => n.route === path);
+  let arg = null;
+
+  if (!item && !state.isAdmin && path.startsWith('role/')) {
+    arg = path.slice(5);
+    if (state.myRoles.includes(arg)) item = { route: path, page: 'my-tasks', label: state.roles.find((r) => r.key === arg)?.name };
+  }
+  if (!item) { location.replace(`#/${nav[0].route}`); return; }
+
+  document.querySelectorAll('.nav a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === item.route));
+  document.querySelectorAll('.nav a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
+  closeDrawer();
+  if (typeof cleanup === 'function') { try { cleanup(); } catch { /* ignore */ } }
+  cleanup = null;
+
+  const el = document.getElementById('content');
+  const title = document.getElementById('page-title');
+  title.textContent = item.label || '';
+  el.innerHTML = '';
+  window.scrollTo(0, 0);
+  try {
+    const mod = await import(`./pages/${item.page}.js`);
+    cleanup = await mod.render({ el, params, arg, route: item.route, setTitle: (t) => { title.textContent = t; } });
+  } catch (e) {
+    console.error(e);
+    el.innerHTML = `<div class="panel"><div class="empty"><h3>This page didn't load</h3><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">Reload</button></div></div>`;
+  }
+}
+
+boot().catch((e) => {
+  console.error(e);
+  document.getElementById('app').innerHTML = `<div class="fatal"><h1>EcomHub OS couldn't start</h1><p>${esc(e.message)}</p><p style="margin-top:16px"><a href="/login.html">Back to sign in</a></p></div>`;
+  if (/session|JWT/i.test(e.message)) toast(e.message, 'error');
+});

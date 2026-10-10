@@ -1,0 +1,90 @@
+// Member profile (and the "Your profile" block reused in admin Settings)
+import { supabase } from '../supabase.js';
+import { state } from '../state.js';
+import { q } from '../data.js';
+import { esc, icon, avatar, fullName, roleChip, toast, busy } from '../ui.js';
+import { fmtDate } from '../time.js';
+
+export async function render({ el }) {
+  const p = state.profile;
+  el.innerHTML = `
+    <div class="page-head"><div><h1>Profile</h1><p>Your details, roles and password.</p></div></div>
+    <div class="grid-3-1">
+      <div class="stack">
+        <section class="panel"><div class="panel-head"><h2>Personal details</h2></div><div class="panel-body" id="pf"></div></section>
+        <section class="panel"><div class="panel-head"><h2>Password</h2></div><div class="panel-body" id="pw"></div></section>
+      </div>
+      <div class="stack">
+        <section class="panel"><div class="panel-body">
+          <div class="row" style="gap:14px;margin-bottom:16px">${avatar(p, 'lg')}<div><div style="font-weight:600;font-size:15px">${esc(fullName(p))}</div><div class="small muted">${esc(p.email)}</div></div></div>
+          <dl class="kv" style="grid-template-columns:110px 1fr">
+            <dt>Employee ID</dt><dd class="num">${esc(p.employee_code)}</dd>
+            <dt>Job title</dt><dd>${esc(p.job_title || '—')}</dd>
+            <dt>Department</dt><dd>${esc(p.department || '—')}</dd>
+            <dt>Joined</dt><dd>${esc(fmtDate(p.joined_on))}</dd>
+          </dl>
+          <div class="section-title" style="margin-top:18px">My roles</div>
+          <div class="chips">${state.myRoles.map((r) => roleChip(r, state.roles)).join('') || '<span class="muted small">No roles yet</span>'}</div>
+          <p class="small muted" style="margin-top:12px">The admin manages your roles, job title and department.</p>
+        </div></section>
+        <section class="panel"><div class="panel-body">
+          <div class="section-title">${icon('shield', 14)} How tracking works</div>
+          <p class="small" style="color:var(--ink-2);line-height:1.6">EcomHub OS records when you sign in and out, whether you're active or idle in this tab (idle after ${state.settings.idle_minutes} minutes without a click, key press or scroll), and the time you log with task timers. It does not record what you type, take screenshots, or see other apps. Your records are under <a href="#/my-activity">My activity</a> and <a href="#/my-time">My work time</a>.</p>
+        </div></section>
+      </div>
+    </div>`;
+  mountProfileForm(el.querySelector('#pf'));
+  mountPasswordForm(el.querySelector('#pw'));
+}
+
+export function mountProfileForm(box) {
+  const p = state.profile;
+  box.innerHTML = `
+    <form class="form-grid" novalidate>
+      <div class="field"><label for="pf-first">First name</label><input id="pf-first" class="input" value="${esc(p.first_name)}" maxlength="80"></div>
+      <div class="field"><label for="pf-last">Last name</label><input id="pf-last" class="input" value="${esc(p.last_name)}" maxlength="80"></div>
+      <div class="field"><label for="pf-email">Email</label><input id="pf-email" class="input" value="${esc(p.email)}" disabled></div>
+      <div class="field"><label for="pf-phone">Phone</label><input id="pf-phone" class="input" value="${esc(p.phone || '')}" maxlength="30"></div>
+      <div class="span-2"><button class="btn btn-primary" type="submit">Save details</button></div>
+    </form>`;
+  const form = box.querySelector('form');
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const body = {
+      first_name: form.querySelector('#pf-first').value.trim(),
+      last_name: form.querySelector('#pf-last').value.trim(),
+      phone: form.querySelector('#pf-phone').value.trim() || null,
+    };
+    if (!body.first_name) { toast('First name is required', 'error'); return; }
+    busy(form.querySelector('[type=submit]'), async () => {
+      try {
+        await q(supabase.from('profiles').update(body).eq('id', p.id));
+        Object.assign(state.profile, body);
+        document.querySelectorAll('.me .name').forEach((n) => { n.textContent = fullName(state.profile); });
+        toast('Details saved');
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  });
+}
+
+export function mountPasswordForm(box) {
+  box.innerHTML = `
+    <form class="form-grid" novalidate>
+      <div class="field"><label for="np1">New password</label><input id="np1" type="password" class="input" autocomplete="new-password" minlength="8"></div>
+      <div class="field"><label for="np2">Confirm new password</label><input id="np2" type="password" class="input" autocomplete="new-password" minlength="8"></div>
+      <div class="span-2"><button class="btn" type="submit">Change password</button></div>
+    </form>`;
+  const form = box.querySelector('form');
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const a = form.querySelector('#np1').value; const b = form.querySelector('#np2').value;
+    if (a.length < 8) return toast('Use at least 8 characters', 'error');
+    if (a !== b) return toast('The passwords don\'t match', 'error');
+    busy(form.querySelector('[type=submit]'), async () => {
+      const { error } = await supabase.auth.updateUser({ password: a });
+      if (error) return toast(error.message, 'error');
+      form.reset();
+      toast('Password changed');
+    });
+  });
+}

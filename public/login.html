@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · EcomHub OS</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body data-page="login">
+  <div class="auth">
+    <section class="auth-side" aria-hidden="true">
+      <div class="brand" style="padding:0">
+        <div class="brand-mark">EH</div>
+        <div class="brand-name">EcomHub OS<small>Ecometrix Hub</small></div>
+      </div>
+      <div>
+        <h1>Every task, every hour, one hub.</h1>
+        <p class="lede">Assign work by role, run timers on tasks and see who is active right now. Built for the Ecometrix Hub team.</p>
+      </div>
+      <div class="auth-demo">
+        <div class="demo-row"><span class="n">Sales</span><div class="ribbon"><div class="track"></div><span class="blk active" style="left:37%;width:9%"></span><span class="blk idle" style="left:46%;width:3%"></span><span class="blk active" style="left:49%;width:14%"></span><span class="blk timer" style="left:38%;width:22%"></span></div></div>
+        <div class="demo-row"><span class="n">Lead gen</span><div class="ribbon"><div class="track"></div><span class="blk active" style="left:40%;width:16%"></span><span class="blk active" style="left:58%;width:12%"></span><span class="blk timer" style="left:41%;width:28%"></span></div></div>
+        <div class="demo-row"><span class="n">Cold calls</span><div class="ribbon"><div class="track"></div><span class="blk active" style="left:72%;width:10%"></span><span class="blk idle" style="left:82%;width:4%"></span><span class="blk active" style="left:86%;width:9%"></span><span class="blk timer" style="left:73%;width:21%"></span></div></div>
+        <div class="legend"><span><i class="active"></i>Active</span><span><i class="idle"></i>Idle</span><span><i class="timer"></i>Task timer</span></div>
+      </div>
+    </section>
+
+    <main class="auth-main">
+      <div class="auth-card">
+        <div id="view-login">
+          <h2>Sign in</h2>
+          <p class="sub">Use the email your admin invited.</p>
+        </div>
+        <div id="view-reset" class="hidden">
+          <h2>Reset your password</h2>
+          <p class="sub">We'll email you a link to set a new password.</p>
+        </div>
+
+        <div id="msg" class="hidden"></div>
+
+        <form id="login-form" novalidate>
+          <div class="field">
+            <label for="email">Email</label>
+            <input id="email" class="input" type="email" autocomplete="email" required>
+          </div>
+          <div class="field">
+            <div class="row between"><label for="password">Password</label><button type="button" class="linkish" id="to-reset">Forgot password?</button></div>
+            <div class="pw">
+              <input id="password" class="input" type="password" autocomplete="current-password" required>
+              <button type="button" class="btn btn-ghost btn-sm btn-icon" id="toggle-pw" aria-label="Show password"></button>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-lg btn-block" type="submit">Sign in</button>
+        </form>
+
+        <form id="reset-form" class="hidden" novalidate>
+          <div class="field">
+            <label for="reset-email">Email</label>
+            <input id="reset-email" class="input" type="email" autocomplete="email" required>
+          </div>
+          <button class="btn btn-primary btn-lg btn-block" type="submit">Send reset link</button>
+          <button type="button" class="linkish" id="to-login">Back to sign in</button>
+        </form>
+
+        <p class="auth-foot" id="tracking-note"></p>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/js/auth.js"></script>
+</body>
+</html>
