@@ -6,6 +6,7 @@ import { esc, icon, statusBadge, prioTag, roleChip, emptyState, loadingBlock, on
 import { fmtDuration, dueLabel, dueState } from '../time.js';
 import { liveAttrs, startTimer, pauseTimer, timerStateFor, onTimerChange } from '../timer.js';
 import { openTaskDrawer } from '../task-drawer.js';
+import { can, canAny } from '../state.js';
 
 const ORDER = { in_progress: 0, todo: 1, in_review: 2, completed: 3 };
 const PRIO = { urgent: 0, high: 1, medium: 2, low: 3 };
@@ -22,6 +23,7 @@ export async function render({ el, arg: role, setTitle }) {
         <div><h1>${esc(r.name)}</h1><p>${esc(r.description)}. Tasks the admin assigned to you for this role.</p></div></div>`
       : '<div><h1>My tasks</h1><p>Everything assigned to you. Start a timer when you begin working on a task.</p></div>'}
     </div>
+    <div id="role-panel"></div>
     <div class="toolbar"><div class="seg" role="group" aria-label="Filter tasks" id="filters"></div></div>
     <section class="panel"><div id="list">${loadingBlock(5)}</div></section>`;
   const list = el.querySelector('#list');
@@ -96,6 +98,29 @@ export async function render({ el, arg: role, setTitle }) {
     }),
     onTimerChange(() => safe()),
   ];
+  // Role-specific panel on top of the role tab (leads for lead gen / sales / calls, clients for PMs)
+  const rp = el.querySelector('#role-panel');
+  async function loadPanel() {
+    if (!role) return;
+    try {
+      if (['lead_gen', 'sales_rep', 'cold_caller'].includes(role) && can('leads')) {
+        const m = await import('./leads.js');
+        rp.innerHTML = await m.leadsPanel(role);
+        rp.querySelector('[data-new-lead]')?.addEventListener('click', () => m.openLeadForm());
+        rp.querySelector('[data-import]')?.addEventListener('click', () => m.openImport());
+        rp.querySelectorAll('[data-lead]').forEach((x) => x.onclick = () => m.openLeadDrawer(Number(x.dataset.lead)));
+      } else if (role === 'project_manager' && canAny('clients')) {
+        const m = await import('./clients.js');
+        rp.innerHTML = await m.clientsPanel();
+        rp.querySelectorAll('[data-client]').forEach((x) => x.onclick = () => m.openClientDrawer(Number(x.dataset.client)));
+      } else if (role === 'finance' && can('finance')) {
+        const b = await import('../business.js');
+        rp.innerHTML = `<div class="role-panel">${b.businessPanel(await b.loadBusiness(), { compact: true })}<p style="margin-top:10px"><a class="btn btn-sm" href="#/finance">Open finance</a></p></div>`;
+      }
+    } catch (e) { rp.innerHTML = `<div class="note warn role-panel">${esc(e.message)}</div>`; }
+  }
+  loadPanel();
+  window.addEventListener('ehos:data-changed', loadPanel);
   const safe = () => load().catch((e) => { list.innerHTML = `<div class="form-error" style="margin:16px">${esc(e.message)}</div>`; });
   await safe();
   window.addEventListener('ehos:data-changed', safe);
@@ -104,6 +129,7 @@ export async function render({ el, arg: role, setTitle }) {
   return () => {
     offs.forEach((x) => x()); clearInterval(poll);
     window.removeEventListener('ehos:data-changed', safe); window.removeEventListener('focus', safe);
+    window.removeEventListener('ehos:data-changed', loadPanel);
   };
 }
 

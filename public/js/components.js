@@ -105,17 +105,23 @@ export const EVENT_LABELS = {
   task_status_changed: 'Status changed', task_submitted: 'Submitted for review', task_approved: 'Task approved',
   revision_requested: 'Changes requested', comment_added: 'Comment',
   timer_started: 'Timer started', timer_paused: 'Timer paused', timer_resumed: 'Timer resumed', timer_stopped: 'Timer stopped',
-  settings_changed: 'Settings changed',
+  settings_changed: 'Settings changed', permission_changed: 'Permission changed',
+  lead_created: 'Lead added', lead_status_changed: 'Lead updated', lead_won: 'Lead won', lead_lost: 'Lead lost', lead_deleted: 'Lead deleted',
+  client_created: 'Client added', client_pm_assigned: 'PM assigned', client_status_changed: 'Client updated', client_deleted: 'Client deleted',
+  invoice_created: 'Invoice added', invoice_paid: 'Invoice paid', invoice_updated: 'Invoice updated', invoice_deleted: 'Invoice deleted',
+  file_uploaded: 'File uploaded', file_deleted: 'File deleted',
 };
 export const EVENT_GROUPS = [
   ['Sign-ins', ['login', 'logout']],
   ['Tasks', ['task_created', 'task_assigned', 'task_reassigned', 'task_updated', 'task_status_changed', 'task_submitted', 'task_approved', 'revision_requested']],
   ['Timers', ['timer_started', 'timer_paused', 'timer_resumed', 'timer_stopped']],
   ['Team', ['member_invited', 'invite_accepted', 'member_activated', 'member_deactivated', 'member_roles_changed', 'invite_resent', 'reset_link_created']],
-  ['Settings', ['settings_changed', 'admin_provisioned']],
+  ['Leads & clients', ['lead_created', 'lead_status_changed', 'lead_won', 'lead_lost', 'lead_deleted', 'client_created', 'client_pm_assigned', 'client_status_changed', 'client_deleted', 'file_uploaded', 'file_deleted']],
+  ['Finance', ['invoice_created', 'invoice_paid', 'invoice_updated', 'invoice_deleted']],
+  ['Settings', ['settings_changed', 'permission_changed', 'admin_provisioned']],
 ];
 const evClass = (a) => a.startsWith('task_') || a === 'revision_requested' ? 'task' : a.startsWith('timer_') ? 'timer'
-  : ['login', 'logout'].includes(a) ? 'signin' : /member|invite|reset_link|admin_/.test(a) ? 'member' : '';
+  : ['login', 'logout'].includes(a) ? 'signin' : /member|invite|reset_link|admin_/.test(a) ? 'member' : /^(lead|client|file)_/.test(a) ? 'task' : /^invoice_/.test(a) ? 'timer' : '';
 
 export function logItem(l, { time = 'time', meId = null } = {}) {
   const whoName = l.actor_id && l.actor_id === meId ? 'You' : (l.actor_name || 'System');
@@ -128,3 +134,12 @@ export function logItem(l, { time = 'time', meId = null } = {}) {
     </div>`;
 }
 const fmtTimeAgo = (iso) => fmtRelative(iso);
+
+// Revenue by month: rows = [{ month: 'YYYY-MM', revenue }]
+export function moneyBars(rows, fmt) {
+  const max = Math.max(1, ...rows.map((r) => Number(r.revenue)));
+  const label = (m) => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(m + '-01T00:00:00Z'));
+  return `<div class="mbars">${rows.map((r, i) => `<div class="col ${i === rows.length - 1 ? 'now' : ''}" title="${esc(r.month)}: ${esc(fmt(r.revenue))}">
+      ${Number(r.revenue) ? `<span class="val">${esc(fmt(r.revenue, { compact: true }))}</span>` : ''}<div class="bar" style="height:${(Number(r.revenue) / max) * 100}%"></div></div>`).join('')}</div>
+    <div class="mlabels">${rows.map((r) => `<span>${label(r.month)}</span>`).join('')}</div>`;
+}

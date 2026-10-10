@@ -1,0 +1,335 @@
+// Clients: onboarding, project manager, invoices, contracts & documents
+import { supabase } from '../supabase.js';
+import { state, can, canAny, money } from '../state.js';
+import { q, loadDirectory, dirName } from '../data.js';
+import { esc, icon, emptyState, loadingBlock, on, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy } from '../ui.js';
+import { fmtDate, fmtDateOfIso, todayStr, daysBetween } from '../time.js';
+
+export const CLIENT_STATUS = { onboarding: 'Onboarding', active: 'Active', paused: 'Paused', churned: 'Churned' };
+export const INVOICE_STATUS = { draft: 'Draft', sent: 'Unpaid', paid: 'Paid', cancelled: 'Cancelled' };
+const FILE_KINDS = { contract: 'Contract', document: 'Document', invoice: 'Invoice PDF', other: 'Other' };
+const changed = () => window.dispatchEvent(new CustomEvent('ehos:data-changed'));
+export const clientBadge = (s) => `<span class="badge ${esc(s)}">${esc(CLIENT_STATUS[s] || s)}</span>`;
+export const invoiceState = (inv) => (inv.status === 'sent' && inv.due_date && inv.due_date < todayStr() ? 'overdue' : inv.status);
+export const invoiceBadge = (inv) => { const s = invoiceState(inv); return `<span class="badge ${s}">${s === 'overdue' ? `Overdue ${daysBetween(inv.due_date, todayStr())}d` : INVOICE_STATUS[s]}</span>`; };
+const isPM = (c) => c.project_manager === state.profile.id;
+const canEditClient = (c) => can('clients', 'edit') || (isPM(c) && state.pmPerms.clients?.edit);
+const canDeleteClient = (c) => can('clients', 'delete') || (isPM(c) && state.pmPerms.clients?.delete);
+const canInv = (c, a) => can('finance', a) || (isPM(c) && state.pmPerms.finance?.[a]);
+const canFiles = (c, a) => (a === 'view' ? true : a === 'edit' ? canEditClient(c) : canDeleteClient(c));
+
+export async function render({ el, params }) {
+  let clients = []; let invoices = []; let dir = [];
+  let status = params.get('status') || 'all';
+  let pmFilter = ''; let search = '';
+  const showMoney = canAny('finance');
+  const onlyMine = !can('clients');
+
+  el.innerHTML = `
+    <div class="page-head">
+      <div><h1>${onlyMine ? 'My clients' : 'Clients'}</h1><p>${onlyMine ? 'Clients assigned to you as project manager.' : 'Won deals with their onboarding, contracts, invoices and revenue.'}</p></div>
+      <div class="actions">${can('clients', 'edit') ? `<button class="btn btn-primary" id="new">${icon('plus', 15)}New client</button>` : ''}</div>
+    </div>
+    <div class="toolbar"><div class="seg" role="group" aria-label="Status" id="status"></div></div>
+    <div class="toolbar">
+      <div class="search grow">${icon('search', 15)}<input class="input" id="q" placeholder="Search clients" aria-label="Search clients"></div>
+      ${onlyMine ? '' : '<select class="select" id="pm" style="width:auto" aria-label="Project manager"><option value="">Any project manager</option><option value="none">No project manager</option></select>'}
+    </div>
+    <section class="panel"><div class="table-wrap" id="table">${loadingBlock(5)}</div></section>`;
+  const table = el.querySelector('#table');
+
+  const sums = (id) => {
+    const inv = invoices.filter((i) => i.client_id === id);
+    return { paid: inv.filter((i) => i.status === 'paid').reduce((a, i) => a + Number(i.amount), 0), due: inv.filter((i) => i.status === 'sent').reduce((a, i) => a + Number(i.amount), 0), overdue: inv.some((i) => invoiceState(i) === 'overdue') };
+  };
+
+  function draw() {
+    el.querySelector('#status').innerHTML = [['all', 'All'], ...Object.entries(CLIENT_STATUS)].map(([k, v]) =>
+      `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${k === 'all' ? clients.length : clients.filter((c) => c.status === k).length}</span></button>`).join('');
+    const s = search.toLowerCase();
+    const list = clients.filter((c) => (status === 'all' || c.status === status)
+      && (!pmFilter || (pmFilter === 'none' ? !c.project_manager : c.project_manager === pmFilter))
+      && (!s || `${c.name} ${c.contact_name || ''} ${c.email || ''}`.toLowerCase().includes(s)));
+    if (!clients.length) {
+      table.innerHTML = emptyState(onlyMine ? 'No clients assigned to you yet' : 'No clients yet', onlyMine ? 'When the admin assigns you a client, it shows up here.' : 'Mark a lead as won, or add a client directly.', can('clients', 'edit') ? '<button class="btn btn-primary" data-new>New client</button>' : '');
+      return;
+    }
+    if (!list.length) { table.innerHTML = emptyState('No clients match these filters'); return; }
+    table.innerHTML = `<table class="table">
+      <thead><tr><th>Client</th><th>Status</th><th>Onboarded</th><th>Project manager</th><th class="r">Retainer / mo</th>${showMoney ? '<th class="r">Revenue</th><th class="r">Unpaid</th>' : ''}</tr></thead>
+      <tbody>${list.map((c) => { const m = sums(c.id); return `<tr class="clickable" data-id="${c.id}" tabindex="0">
+        <td><div style="font-weight:500">${esc(c.name)}</div><div class="small muted">${esc([c.contact_name, c.country].filter(Boolean).join(', ') || '—')}</div></td>
+        <td>${clientBadge(c.status)}</td>
+        <td class="small">${esc(fmtDate(c.onboarding_date))}</td>
+        <td class="small">${esc(dirName(dir, c.project_manager) || '—')}</td>
+        <td class="r money">${c.monthly_retainer ? money(c.monthly_retainer) : '<span class="muted">—</span>'}</td>
+        ${showMoney ? `<td class="r money pos">${money(m.paid)}</td><td class="r money" style="${m.overdue ? 'color:var(--error);font-weight:600' : ''}">${m.due ? money(m.due) : '<span class="muted">—</span>'}</td>` : ''}
+      </tr>`; }).join('')}</tbody></table>`;
+  }
+
+  async function load() {
+    [clients, invoices, dir] = await Promise.all([
+      q(supabase.from('clients').select('*').order('created_at', { ascending: false })),
+      showMoney ? q(supabase.from('invoices').select('id, client_id, amount, status, due_date')) : Promise.resolve([]),
+      loadDirectory(),
+    ]);
+    const sel = el.querySelector('#pm');
+    if (sel && sel.options.length <= 2) {
+      sel.insertAdjacentHTML('beforeend', dir.filter((d) => d.roles.includes('project_manager')).map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join(''));
+    }
+    draw();
+  }
+
+  el.querySelector('#status').addEventListener('click', (e) => { const b = e.target.closest('[data-s]'); if (b) { status = b.dataset.s; draw(); } });
+  el.querySelector('#q').addEventListener('input', (e) => { search = e.target.value.trim(); draw(); });
+  el.querySelector('#pm')?.addEventListener('change', (e) => { pmFilter = e.target.value; draw(); });
+  el.querySelector('#new')?.addEventListener('click', () => openClientForm());
+  const offs = [
+    on(table, 'click', '[data-new]', () => openClientForm()),
+    on(table, 'click', 'tr[data-id]', (e, tr) => openClientDrawer(Number(tr.dataset.id))),
+    on(table, 'keydown', 'tr[data-id]', (e, tr) => { if (e.key === 'Enter') openClientDrawer(Number(tr.dataset.id)); }),
+  ];
+  const safe = () => load().catch((e) => { table.innerHTML = `<div class="form-error" style="margin:16px">${esc(e.message)}</div>`; });
+  await safe();
+  if (params.get('open')) openClientDrawer(Number(params.get('open')));
+  window.addEventListener('ehos:data-changed', safe);
+  return () => { offs.forEach((x) => x()); window.removeEventListener('ehos:data-changed', safe); };
+}
+
+// ---------- Client form ----------
+export async function openClientForm(client = null) {
+  const dir = await loadDirectory();
+  const pms = dir.filter((d) => d.roles.includes('project_manager') && d.status === 'active');
+  const c = client || { name: '', contact_name: '', email: '', phone: '', website: '', country: '', services: '', onboarding_date: todayStr(), status: 'onboarding', monthly_retainer: '', project_manager: '', notes: '' };
+  const canPM = can('clients', 'edit');
+  const m = openModal({
+    title: client ? 'Edit client' : 'New client',
+    wide: true,
+    body: `
+      <form id="cf" class="form-grid" novalidate>
+        <div class="field span-2"><label for="cf-name">Client / brand</label><input id="cf-name" class="input" maxlength="200" value="${esc(c.name)}" required></div>
+        <div class="field"><label for="cf-contact">Contact person</label><input id="cf-contact" class="input" maxlength="120" value="${esc(c.contact_name || '')}"></div>
+        <div class="field"><label for="cf-email">Email</label><input id="cf-email" class="input" type="email" maxlength="160" value="${esc(c.email || '')}"></div>
+        <div class="field"><label for="cf-phone">Phone / WhatsApp</label><input id="cf-phone" class="input" maxlength="40" value="${esc(c.phone || '')}"></div>
+        <div class="field"><label for="cf-web">Website / store</label><input id="cf-web" class="input" maxlength="200" value="${esc(c.website || '')}"></div>
+        <div class="field"><label for="cf-country">Country</label><input id="cf-country" class="input" maxlength="60" value="${esc(c.country || '')}"></div>
+        <div class="field"><label for="cf-date">Onboarding date</label><input id="cf-date" class="input" type="date" value="${esc(c.onboarding_date || '')}"></div>
+        <div class="field"><label for="cf-status">Status</label><select id="cf-status" class="select">${Object.entries(CLIENT_STATUS).map(([k, v]) => `<option value="${k}" ${c.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="field"><label for="cf-ret">Monthly retainer (${esc(state.settings.currency || 'USD')})</label><input id="cf-ret" class="input" type="number" min="0" step="1" value="${esc(c.monthly_retainer ?? '')}"></div>
+        <div class="field span-2"><label for="cf-pm">Project manager</label>
+          <select id="cf-pm" class="select" ${canPM ? '' : 'disabled'}><option value="">Not assigned</option>${pms.map((p) => `<option value="${p.id}" ${c.project_manager === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+          <span class="hint">${pms.length ? 'They see this client (and only their assigned clients) in their account.' : 'Give someone the Project Manager role on the Team page first.'}</span></div>
+        <div class="field span-2"><label for="cf-services">Services</label><input id="cf-services" class="input" maxlength="300" value="${esc(c.services || '')}" placeholder="Meta ads, Google ads, CRO…"></div>
+        <div class="field span-2"><label for="cf-notes">Notes</label><textarea id="cf-notes" class="textarea">${esc(c.notes || '')}</textarea></div>
+        <div class="form-error hidden span-2" id="cf-err"></div>
+      </form>`,
+    foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${client ? 'Save client' : 'Add client'}</button>`,
+  });
+  m.querySelector('[data-cancel]').onclick = () => m.close();
+  const err = m.querySelector('#cf-err'); const save = m.querySelector('[data-save]');
+  const submit = () => busy(save, async () => {
+    err.classList.add('hidden');
+    const v = (id) => m.querySelector(id).value.trim();
+    const payload = {
+      name: v('#cf-name'), contact_name: v('#cf-contact') || null, email: v('#cf-email') || null, phone: v('#cf-phone') || null,
+      website: v('#cf-web') || null, country: v('#cf-country') || null, onboarding_date: v('#cf-date') || null, status: v('#cf-status'),
+      monthly_retainer: v('#cf-ret') === '' ? null : Number(v('#cf-ret')), services: v('#cf-services') || null, notes: v('#cf-notes'),
+    };
+    if (canPM) payload.project_manager = v('#cf-pm') || null;
+    if (!payload.name) { err.textContent = 'Enter the client name.'; err.classList.remove('hidden'); return; }
+    try {
+      if (client) await q(supabase.from('clients').update(payload).eq('id', client.id));
+      else await q(supabase.from('clients').insert(payload));
+      toast(client ? 'Client saved' : 'Client added'); m.close(); changed();
+    } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
+  });
+  save.onclick = submit;
+  m.querySelector('#cf').addEventListener('submit', (e) => { e.preventDefault(); submit(); });
+}
+
+// ---------- Invoice form ----------
+export async function openInvoiceForm({ clientId = null, invoice = null } = {}) {
+  const clients = clientId ? [] : await q(supabase.from('clients').select('id, name').order('name'));
+  const i = invoice || { invoice_number: '', description: '', amount: '', issue_date: todayStr(), due_date: '', status: 'sent' };
+  const m = openModal({
+    title: invoice ? 'Edit invoice' : 'New invoice',
+    body: `
+      <form id="inf" class="form-grid" novalidate>
+        ${clientId ? '' : `<div class="field span-2"><label for="in-client">Client</label><select id="in-client" class="select"><option value="">Choose a client</option>${clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>`}
+        <div class="field"><label for="in-num">Invoice number</label><input id="in-num" class="input" maxlength="40" value="${esc(i.invoice_number || '')}" placeholder="INV-1001"></div>
+        <div class="field"><label for="in-amount">Amount (${esc(state.settings.currency || 'USD')})</label><input id="in-amount" class="input" type="number" min="0" step="0.01" value="${esc(i.amount)}"></div>
+        <div class="field"><label for="in-issue">Issue date</label><input id="in-issue" class="input" type="date" value="${esc(i.issue_date || '')}"></div>
+        <div class="field"><label for="in-due">Due date</label><input id="in-due" class="input" type="date" value="${esc(i.due_date || '')}"></div>
+        <div class="field span-2"><label for="in-status">Status</label><select id="in-status" class="select">${Object.entries(INVOICE_STATUS).map(([k, v]) => `<option value="${k}" ${i.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="field span-2"><label for="in-desc">Description</label><input id="in-desc" class="input" maxlength="300" value="${esc(i.description || '')}" placeholder="October retainer, Meta ads management"></div>
+        <div class="form-error hidden span-2" id="in-err"></div>
+      </form>`,
+    foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${invoice ? 'Save invoice' : 'Add invoice'}</button>`,
+  });
+  m.querySelector('[data-cancel]').onclick = () => m.close();
+  const err = m.querySelector('#in-err'); const save = m.querySelector('[data-save]');
+  const submit = () => busy(save, async () => {
+    err.classList.add('hidden');
+    const v = (id) => m.querySelector(id)?.value.trim();
+    const payload = {
+      invoice_number: v('#in-num') || null, amount: Number(v('#in-amount')), issue_date: v('#in-issue') || todayStr(),
+      due_date: v('#in-due') || null, status: v('#in-status'), description: v('#in-desc') || '',
+    };
+    const cid = clientId || Number(v('#in-client'));
+    if (!cid) { err.textContent = 'Choose a client.'; err.classList.remove('hidden'); return; }
+    if (!(payload.amount >= 0) || v('#in-amount') === '') { err.textContent = 'Enter the amount.'; err.classList.remove('hidden'); return; }
+    try {
+      if (invoice) await q(supabase.from('invoices').update(payload).eq('id', invoice.id));
+      else await q(supabase.from('invoices').insert({ ...payload, client_id: cid }));
+      toast(invoice ? 'Invoice saved' : 'Invoice added'); m.close(); changed();
+    } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
+  });
+  save.onclick = submit;
+  m.querySelector('#inf').addEventListener('submit', (e) => { e.preventDefault(); submit(); });
+}
+
+// ---------- Client drawer ----------
+export function openClientDrawer(id, tab = 'overview') {
+  const drawer = openDrawer({ title: 'Client', body: loadingBlock(4), onClose: () => window.removeEventListener('ehos:data-changed', reload) });
+  const reload = () => load();
+  window.addEventListener('ehos:data-changed', reload);
+
+  async function load() {
+    const [c, dir] = await Promise.all([q(supabase.from('clients').select('*').eq('id', id).maybeSingle()), loadDirectory()]);
+    if (!drawer.isConnected) return;
+    if (!c) { drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This client was deleted or isn\'t assigned to you.</p>'; return; }
+    const showInv = canInv(c, 'view');
+    const [invoices, files] = await Promise.all([
+      showInv ? q(supabase.from('invoices').select('*').eq('client_id', id).order('issue_date', { ascending: false })) : Promise.resolve([]),
+      q(supabase.from('client_files').select('*').eq('client_id', id).order('created_at', { ascending: false })),
+    ]);
+    if (!drawer.isConnected) return;
+    drawer.querySelector('.drawer-head h2').textContent = c.name;
+    const paid = invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + Number(i.amount), 0);
+    const due = invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + Number(i.amount), 0);
+    const tabs = [['overview', 'Overview'], showInv && ['invoices', `Invoices${invoices.length ? ` (${invoices.length})` : ''}`], ['files', `Contracts & files${files.length ? ` (${files.length})` : ''}`]].filter(Boolean);
+    if (!tabs.some(([k]) => k === tab)) tab = 'overview';
+
+    let content = '';
+    if (tab === 'overview') {
+      content = `
+        <div class="row wrap">${clientBadge(c.status)}${c.monthly_retainer ? `<span class="chip">${money(c.monthly_retainer)} / mo</span>` : ''}</div>
+        ${showInv ? `<div class="stats"><div class="stat-group">
+          <div class="stat"><div class="v" style="font-size:19px;color:#15803D">${money(paid)}</div><div class="k">Revenue</div></div>
+          <div class="stat"><div class="v" style="font-size:19px">${money(due)}</div><div class="k">Unpaid</div></div>
+          <div class="stat"><div class="v" style="font-size:19px">${invoices.length}</div><div class="k">Invoices</div></div></div></div>` : ''}
+        <dl class="kv">
+          <dt>Onboarding date</dt><dd>${esc(fmtDate(c.onboarding_date))}</dd>
+          <dt>Project manager</dt><dd>${esc(dirName(dir, c.project_manager) || 'Not assigned')}</dd>
+          <dt>Contact</dt><dd>${esc(c.contact_name || '—')}</dd>
+          <dt>Email</dt><dd>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '—'}</dd>
+          <dt>Phone</dt><dd>${esc(c.phone || '—')}</dd>
+          <dt>Website</dt><dd>${c.website ? `<a href="${esc(/^https?:/.test(c.website) ? c.website : 'https://' + c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : '—'}</dd>
+          <dt>Country</dt><dd>${esc(c.country || '—')}</dd>
+          <dt>Services</dt><dd>${esc(c.services || '—')}</dd>
+          <dt>Client since</dt><dd>${esc(fmtDateOfIso(c.created_at))}${c.lead_id ? ' (from a won lead)' : ''}</dd>
+        </dl>
+        <div><div class="section-title">Notes</div>${c.notes ? `<div class="desc">${esc(c.notes)}</div>` : '<p class="muted small">No notes.</p>'}</div>`;
+    } else if (tab === 'invoices') {
+      content = `
+        <div class="section-title">Invoices <span class="row">${canInv(c, 'edit') ? `<button class="btn btn-sm btn-primary" data-new-inv>${icon('plus', 13)}New invoice</button>` : ''}</span></div>
+        ${invoices.length ? `<div class="panel"><div class="list">${invoices.map((i) => `
+          <div class="list-item" style="padding:11px 14px">
+            <div class="grow"><div class="title">${esc(i.invoice_number || `Invoice #${i.id}`)} <span class="money" style="font-weight:600;margin-left:6px">${money(i.amount)}</span></div>
+              <div class="meta"><span>Issued ${esc(fmtDate(i.issue_date))}</span>${i.due_date ? `<span>Due ${esc(fmtDate(i.due_date))}</span>` : ''}${i.paid_date ? `<span>Paid ${esc(fmtDate(i.paid_date))}</span>` : ''}${i.description ? `<span>${esc(i.description)}</span>` : ''}</div></div>
+            ${invoiceBadge(i)}
+            ${canInv(c, 'edit') && i.status === 'sent' ? `<button class="btn btn-sm" data-paid="${i.id}">${icon('check', 13)}Mark paid</button>` : ''}
+            ${canInv(c, 'edit') ? `<button class="btn btn-sm btn-ghost btn-icon" data-edit-inv="${i.id}" aria-label="Edit invoice">${icon('edit', 13)}</button>` : ''}
+            ${canInv(c, 'delete') ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-inv="${i.id}" aria-label="Delete invoice">${icon('trash', 13)}</button>` : ''}
+          </div>`).join('')}</div></div>` : emptyState('No invoices yet', 'Paid invoices count as revenue on the dashboard.')}`;
+    } else {
+      content = `
+        ${canFiles(c, 'edit') ? `<div class="panel"><div class="panel-body stack" style="gap:10px">
+          <div class="section-title" style="margin:0">Upload a file</div>
+          <div class="row wrap"><select class="select select-sm" id="f-kind" style="width:auto">${Object.entries(FILE_KINDS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+          <input type="file" id="f-file" aria-label="File" style="flex:1;min-width:180px"><button class="btn btn-sm btn-primary" data-upload>${icon('upload', 13)}Upload</button></div>
+          <span class="hint small muted">PDF, Word, images, up to 25 MB. Only people who can see this client can open it.</span></div></div>` : ''}
+        ${files.length ? `<div class="panel"><div>${files.map((f) => `
+          <div class="file-row">${icon('file', 18)}<div class="grow"><div class="title">${esc(f.name)}</div>
+            <div class="small muted">${esc(FILE_KINDS[f.kind] || f.kind)}, ${f.size_bytes ? (f.size_bytes / 1048576).toFixed(1) + ' MB, ' : ''}${esc(dirName(dir, f.uploaded_by) || '')} ${esc(fmtDateOfIso(f.created_at))}</div></div>
+            <button class="btn btn-sm" data-open-file="${esc(f.storage_path)}">${icon('download', 13)}Open</button>
+            ${canFiles(c, 'delete') ? `<button class="btn btn-sm btn-ghost btn-icon btn-danger" data-del-file="${f.id}" aria-label="Delete file">${icon('trash', 13)}</button>` : ''}
+          </div>`).join('')}</div></div>` : emptyState('No contracts or documents yet')}`;
+    }
+
+    drawer.querySelector('.drawer-body').innerHTML = `
+      <div class="tabs-line" role="tablist">${tabs.map(([k, v]) => `<button data-tab="${k}" aria-pressed="${tab === k}">${v}</button>`).join('')}</div>${content}`;
+    let foot = '';
+    if (canDeleteClient(c)) foot += `<button class="btn btn-ghost btn-danger" data-act="delete">${icon('trash', 14)}Delete</button>`;
+    foot += '<span style="flex:1"></span>';
+    if (canEditClient(c)) foot += `<button class="btn btn-primary" data-act="edit">${icon('edit', 14)}Edit client</button>`;
+    let footEl = drawer.querySelector('.drawer-foot');
+    if (!footEl) { footEl = document.createElement('div'); footEl.className = 'drawer-foot'; drawer.append(footEl); }
+    footEl.innerHTML = foot;
+
+    const body = drawer.querySelector('.drawer-body');
+    body.querySelectorAll('[data-tab]').forEach((b) => b.onclick = () => { tab = b.dataset.tab; load(); });
+    body.querySelector('[data-new-inv]')?.addEventListener('click', () => openInvoiceForm({ clientId: id }));
+    body.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = () => openInvoiceForm({ clientId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }));
+    body.querySelectorAll('[data-paid]').forEach((b) => b.onclick = () => busy(b, async () => {
+      try { await q(supabase.from('invoices').update({ status: 'paid' }).eq('id', Number(b.dataset.paid))); toast('Marked as paid'); changed(); } catch (e) { toast(e.message, 'error'); }
+    }));
+    body.querySelectorAll('[data-del-inv]').forEach((b) => b.onclick = async () => {
+      if (!await confirmDialog({ title: 'Delete this invoice?', text: 'It stops counting toward revenue.', confirm: 'Delete invoice', danger: true })) return;
+      try { await q(supabase.from('invoices').delete().eq('id', Number(b.dataset.delInv))); toast('Invoice deleted'); changed(); } catch (e) { toast(e.message, 'error'); }
+    });
+    body.querySelectorAll('[data-open-file]').forEach((b) => b.onclick = () => busy(b, async () => {
+      const { data, error } = await supabase.storage.from('client-files').createSignedUrl(b.dataset.openFile, 120);
+      if (error) return toast(error.message, 'error');
+      window.open(data.signedUrl, '_blank', 'noopener');
+    }));
+    body.querySelectorAll('[data-del-file]').forEach((b) => b.onclick = async () => {
+      const f = files.find((x) => x.id === Number(b.dataset.delFile));
+      if (!await confirmDialog({ title: `Delete ${f.name}?`, confirm: 'Delete file', danger: true })) return;
+      try {
+        await q(supabase.from('client_files').delete().eq('id', f.id));
+        await supabase.storage.from('client-files').remove([f.storage_path]);
+        toast('File deleted'); changed();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    body.querySelector('[data-upload]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const file = body.querySelector('#f-file').files[0];
+      if (!file) return toast('Choose a file first', 'error');
+      if (file.size > 25 * 1048576) return toast('Files can be up to 25 MB', 'error');
+      const safeName = file.name.replace(/[^\w.\-]+/g, '_').slice(-120);
+      const path = `${id}/${crypto.randomUUID()}-${safeName}`;
+      const up = await supabase.storage.from('client-files').upload(path, file, { contentType: file.type || 'application/octet-stream' });
+      if (up.error) return toast(up.error.message, 'error');
+      try {
+        await q(supabase.from('client_files').insert({ client_id: id, kind: body.querySelector('#f-kind').value, name: file.name.slice(0, 200), storage_path: path, size_bytes: file.size }));
+        toast('File uploaded'); changed();
+      } catch (err) {
+        await supabase.storage.from('client-files').remove([path]);
+        toast(err.message, 'error');
+      }
+    }));
+    footEl.querySelector('[data-act="edit"]')?.addEventListener('click', () => openClientForm(c));
+    footEl.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
+      if (!await confirmDialog({ title: `Delete ${c.name}?`, text: 'Its invoices and file records are deleted too. This can\'t be undone.', confirm: 'Delete client', danger: true })) return;
+      try {
+        const paths = files.map((f) => f.storage_path);
+        if (paths.length) await supabase.storage.from('client-files').remove(paths); // while access checks still pass
+        await q(supabase.from('clients').delete().eq('id', id));
+        toast('Client deleted'); closeDrawer(); changed();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+  load().catch((e) => { drawer.querySelector('.drawer-body').innerHTML = `<div class="form-error">${esc(e.message)}</div>`; });
+}
+
+// Small list for the Project Manager role tab
+export async function clientsPanel() {
+  const list = await q(supabase.from('clients').select('id, name, status, onboarding_date, contact_name').eq('project_manager', state.profile.id).order('name'));
+  return `
+    <section class="panel role-panel">
+      <div class="panel-head"><div><h2>Your clients</h2><p>${list.length} assigned to you</p></div><a class="btn btn-sm btn-ghost" href="#/clients">Open clients</a></div>
+      <div class="list">${list.length ? list.map((c) => `
+        <div class="list-item clickable" data-client="${c.id}"><div class="grow"><div class="title">${esc(c.name)}</div><div class="meta"><span>${esc(c.contact_name || '')}</span><span>Onboarded ${esc(fmtDate(c.onboarding_date))}</span></div></div>${clientBadge(c.status)}</div>`).join('')
+        : emptyState('No clients assigned yet', 'When the admin assigns you a client, it shows up here.')}</div>
+    </section>`;
+}

@@ -165,6 +165,20 @@ language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and status = 'active');
 $$;
 
+-- Admin, or an active member holding the Manager role: sees and manages the whole workspace
+create or replace function public.is_manager_id(p_id uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from profiles p
+     where p.id = p_id and p.status = 'active'
+       and (p.role = 'admin' or exists (select 1 from member_roles m where m.member_id = p.id and m.role_key = 'manager')));
+$$;
+
+create or replace function public.is_manager() returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.is_manager_id(auth.uid());
+$$;
+
 create or replace function public.app_tz() returns text
 language sql stable security definer set search_path = public as $$
   select coalesce((select timezone from app_settings where id = 1), 'Asia/Karachi');
@@ -191,7 +205,7 @@ create or replace function public.assert_can_view(p_user uuid) returns void
 language plpgsql stable security definer set search_path = public as $$
 begin
   if auth.uid() is null then raise exception 'You are not signed in'; end if;
-  if not is_admin() and p_user is distinct from auth.uid() then
+  if not is_manager() and p_user is distinct from auth.uid() then
     raise exception 'You can only view your own records';
   end if;
 end $$;
@@ -261,8 +275,12 @@ returns void
 language plpgsql security definer set search_path = public as $$
 declare v_old text[]; v_new text[];
 begin
-  if not exists (select 1 from profiles where id = p_actor and role = 'admin' and status = 'active') then
-    raise exception 'Only the admin can manage members';
+  if not is_manager_id(p_actor) then
+    raise exception 'Only the admin or a manager can manage members';
+  end if;
+  if exists (select 1 from profiles where id = p_member and role = 'admin')
+     and not exists (select 1 from profiles where id = p_actor and role = 'admin') then
+    raise exception 'Only the admin can edit the admin account';
   end if;
   update profiles set
     first_name = coalesce(p_fields ->> 'first_name', first_name),
@@ -294,8 +312,11 @@ returns void
 language plpgsql security definer set search_path = public as $$
 declare v_old text; s record;
 begin
-  if not exists (select 1 from profiles where id = p_actor and role = 'admin' and status = 'active') then
-    raise exception 'Only the admin can manage members';
+  if not is_manager_id(p_actor) then
+    raise exception 'Only the admin or a manager can manage members';
+  end if;
+  if exists (select 1 from profiles where id = p_member and role = 'admin') then
+    raise exception 'The admin account can''t be deactivated';
   end if;
   if p_member = p_actor then raise exception 'You cannot change your own status'; end if;
   if p_status not in ('active', 'inactive', 'suspended') then raise exception 'Invalid status'; end if;
@@ -329,10 +350,9 @@ end $$;
 create or replace function public.settings_after_update() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if (new.company_name, new.timezone, new.idle_minutes) is distinct from (old.company_name, old.timezone, old.idle_minutes) then
+  if (to_jsonb(new) - 'updated_at') is distinct from (to_jsonb(old) - 'updated_at') then
     perform log_event('settings_changed', 'settings', '1', 'Updated app settings',
-      jsonb_build_object('from', jsonb_build_object('company_name', old.company_name, 'timezone', old.timezone, 'idle_minutes', old.idle_minutes),
-                         'to',   jsonb_build_object('company_name', new.company_name, 'timezone', new.timezone, 'idle_minutes', new.idle_minutes)));
+      jsonb_build_object('from', to_jsonb(old) - 'updated_at' - 'id', 'to', to_jsonb(new) - 'updated_at' - 'id'));
   end if;
   return new;
 end $$;
@@ -484,7 +504,7 @@ returns void
 language plpgsql security definer set search_path = public as $$
 declare v_uid uuid := assert_active(); t tasks%rowtype; v_note text := nullif(trim(coalesce(p_note, '')), '');
 begin
-  if not is_admin() then raise exception 'Only the admin can review tasks'; end if;
+  if not is_manager() then raise exception 'Only the admin or a manager can review tasks'; end if;
   select * into t from tasks where id = p_task_id for update;
   if not found then raise exception 'Task not found'; end if;
   if t.status <> 'in_review' then raise exception 'This task is not waiting for review'; end if;
@@ -727,7 +747,7 @@ returns table (user_id uuid, presence text, last_seen_at timestamptz, session_st
 language plpgsql security definer set search_path = public as $$
 #variable_conflict use_column
 begin
-  if not is_admin() then raise exception 'Only the admin can view team presence'; end if;
+  if not is_manager() then raise exception 'Only the admin or a manager can view team presence'; end if;
   perform sweep_stale_sessions();
   return query
   select p.id,
@@ -934,51 +954,51 @@ create policy roles_read on public.team_roles for select to authenticated using 
 
 drop policy if exists profiles_read on public.profiles;
 create policy profiles_read on public.profiles for select to authenticated
-  using (id = (select auth.uid()) or (select public.is_admin()));
+  using (id = (select auth.uid()) or (select public.is_manager()));
 drop policy if exists profiles_self_update on public.profiles;
 create policy profiles_self_update on public.profiles for update to authenticated
   using (id = (select auth.uid())) with check (id = (select auth.uid()));
 
 drop policy if exists member_roles_read on public.member_roles;
 create policy member_roles_read on public.member_roles for select to authenticated
-  using (member_id = (select auth.uid()) or (select public.is_admin()));
+  using (member_id = (select auth.uid()) or (select public.is_manager()));
 
 drop policy if exists tasks_read on public.tasks;
 create policy tasks_read on public.tasks for select to authenticated
-  using (assigned_to = (select auth.uid()) or (select public.is_admin()));
+  using (assigned_to = (select auth.uid()) or (select public.is_manager()));
 drop policy if exists tasks_admin_insert on public.tasks;
-create policy tasks_admin_insert on public.tasks for insert to authenticated with check ((select public.is_admin()));
+create policy tasks_admin_insert on public.tasks for insert to authenticated with check ((select public.is_manager()));
 drop policy if exists tasks_admin_update on public.tasks;
 create policy tasks_admin_update on public.tasks for update to authenticated
-  using ((select public.is_admin())) with check ((select public.is_admin()));
+  using ((select public.is_manager())) with check ((select public.is_manager()));
 drop policy if exists tasks_admin_delete on public.tasks;
-create policy tasks_admin_delete on public.tasks for delete to authenticated using ((select public.is_admin()));
+create policy tasks_admin_delete on public.tasks for delete to authenticated using ((select public.is_manager()));
 
 drop policy if exists comments_read on public.task_comments;
 create policy comments_read on public.task_comments for select to authenticated
   using (exists (select 1 from public.tasks t where t.id = task_id
-                  and (t.assigned_to = (select auth.uid()) or (select public.is_admin()))));
+                  and (t.assigned_to = (select auth.uid()) or (select public.is_manager()))));
 drop policy if exists comments_insert on public.task_comments;
 create policy comments_insert on public.task_comments for insert to authenticated
   with check (author_id = (select auth.uid())
               and exists (select 1 from public.tasks t where t.id = task_id
-                           and (t.assigned_to = (select auth.uid()) or (select public.is_admin()))));
+                           and (t.assigned_to = (select auth.uid()) or (select public.is_manager()))));
 
 drop policy if exists time_read on public.task_time_entries;
 create policy time_read on public.task_time_entries for select to authenticated
-  using (user_id = (select auth.uid()) or (select public.is_admin()));
+  using (user_id = (select auth.uid()) or (select public.is_manager()));
 
 drop policy if exists sessions_read on public.user_sessions;
 create policy sessions_read on public.user_sessions for select to authenticated
-  using (user_id = (select auth.uid()) or (select public.is_admin()));
+  using (user_id = (select auth.uid()) or (select public.is_manager()));
 
 drop policy if exists intervals_read on public.activity_intervals;
 create policy intervals_read on public.activity_intervals for select to authenticated
-  using (user_id = (select auth.uid()) or (select public.is_admin()));
+  using (user_id = (select auth.uid()) or (select public.is_manager()));
 
 drop policy if exists logs_read on public.activity_logs;
 create policy logs_read on public.activity_logs for select to authenticated
-  using ((select public.is_admin()) or actor_id = (select auth.uid()) or subject_id = (select auth.uid()));
+  using ((select public.is_manager()) or actor_id = (select auth.uid()) or subject_id = (select auth.uid()));
 
 
 -- ---------------------------------------------------------------------
@@ -1012,6 +1032,7 @@ revoke execute on all functions in schema public from authenticated;
 
 grant execute on function
   public.is_admin(),
+  public.is_manager(),
   public.session_start(text, text, text),
   public.session_heartbeat(uuid, text, int),
   public.session_end(uuid),
@@ -1033,5 +1054,398 @@ grant execute on function
   public.admin_save_member(uuid, uuid, jsonb, text[]),
   public.admin_set_member_status(uuid, uuid, text)
 to service_role;
+
+
+-- =====================================================================
+--  PART 2 — Leads, clients, finance, files, role permissions
+-- =====================================================================
+
+alter table public.app_settings add column if not exists currency text not null default 'USD';
+grant update (currency) on public.app_settings to authenticated;
+
+insert into public.team_roles (key, name, description, sort) values
+  ('project_manager', 'Project Manager', 'Running delivery for the clients assigned to them', 6)
+on conflict (key) do update set name = excluded.name, description = excluded.description, sort = excluded.sort;
+
+-- ---------- What each role can see / edit / delete ----------
+create table if not exists public.role_permissions (
+  role_key    text not null references public.team_roles(key) on update cascade on delete cascade,
+  module      text not null check (module in ('leads', 'clients', 'finance')),
+  can_view    boolean not null default false,
+  can_edit    boolean not null default false,
+  can_delete  boolean not null default false,
+  updated_at  timestamptz not null default now(),
+  primary key (role_key, module)
+);
+-- Defaults only; the admin changes them on the Permissions page (re-running keeps their choices)
+insert into public.role_permissions (role_key, module, can_view, can_edit, can_delete) values
+  ('lead_gen',        'leads',   true,  true,  false),
+  ('lead_gen',        'clients', false, false, false),
+  ('lead_gen',        'finance', false, false, false),
+  ('sales_rep',       'leads',   true,  true,  false),
+  ('sales_rep',       'clients', true,  false, false),
+  ('sales_rep',       'finance', false, false, false),
+  ('cold_caller',     'leads',   true,  true,  false),
+  ('cold_caller',     'clients', false, false, false),
+  ('cold_caller',     'finance', false, false, false),
+  ('finance',         'leads',   false, false, false),
+  ('finance',         'clients', true,  false, false),
+  ('finance',         'finance', true,  true,  true),
+  ('manager',         'leads',   true,  true,  true),
+  ('manager',         'clients', true,  true,  true),
+  ('manager',         'finance', true,  true,  true),
+  ('project_manager', 'leads',   false, false, false),
+  ('project_manager', 'clients', true,  true,  false),
+  ('project_manager', 'finance', false, false, false)
+on conflict (role_key, module) do nothing;
+
+-- Workspace-wide permission from the caller's roles (Project Manager is assigned-clients only, so not counted here)
+create or replace function public.perm(p_module text, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.is_manager() or exists (
+    select 1 from member_roles mr
+      join role_permissions rp on rp.role_key = mr.role_key and rp.module = p_module
+      join profiles p on p.id = mr.member_id and p.status = 'active'
+     where mr.member_id = auth.uid() and mr.role_key <> 'project_manager'
+       and case p_action when 'view' then rp.can_view when 'edit' then rp.can_edit when 'delete' then rp.can_delete else false end);
+$$;
+
+-- Permission the Project Manager role gives on its assigned clients
+create or replace function public.pm_perm(p_module text, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from member_roles mr
+      join role_permissions rp on rp.role_key = mr.role_key and rp.module = p_module
+      join profiles p on p.id = mr.member_id and p.status = 'active'
+     where mr.member_id = auth.uid() and mr.role_key = 'project_manager'
+       and case p_action when 'view' then rp.can_view when 'edit' then rp.can_edit when 'delete' then rp.can_delete else false end);
+$$;
+
+-- Names + roles of active members, for pickers and "added by" labels (no emails or phones)
+create or replace function public.team_directory()
+returns table (id uuid, name text, roles text[], status text)
+language sql stable security definer set search_path = public as $$
+  select p.id, member_name(p.id), coalesce(array_agg(mr.role_key) filter (where mr.role_key is not null), '{}'), p.status
+    from profiles p left join member_roles mr on mr.member_id = p.id
+   where auth.uid() is not null and p.status in ('active', 'invited')
+   group by p.id;
+$$;
+
+-- ---------- Leads ----------
+create table if not exists public.leads (
+  id               bigint generated always as identity primary key,
+  company          text not null check (char_length(company) between 1 and 200),
+  contact_name     text,
+  email            text,
+  phone            text,
+  website          text,
+  country          text,
+  industry         text,
+  source           text,
+  notes            text not null default '',
+  status           text not null default 'new' check (status in ('new', 'contacted', 'qualified', 'proposal', 'won', 'lost')),
+  estimated_value  numeric(12, 2),
+  assigned_to      uuid references public.profiles(id),
+  created_by       uuid references public.profiles(id),
+  client_id        bigint,
+  won_at           timestamptz,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists leads_status_idx on public.leads (status, created_at desc);
+create index if not exists leads_assigned_idx on public.leads (assigned_to);
+
+-- ---------- Clients ----------
+create table if not exists public.clients (
+  id                bigint generated always as identity primary key,
+  name              text not null check (char_length(name) between 1 and 200),
+  contact_name      text,
+  email             text,
+  phone             text,
+  website           text,
+  country           text,
+  services          text,
+  notes             text not null default '',
+  status            text not null default 'onboarding' check (status in ('onboarding', 'active', 'paused', 'churned')),
+  onboarding_date   date default current_date,
+  monthly_retainer  numeric(12, 2),
+  project_manager   uuid references public.profiles(id),
+  lead_id           bigint references public.leads(id) on delete set null,
+  created_by        uuid references public.profiles(id),
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists clients_pm_idx on public.clients (project_manager);
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'leads_client_fk') then
+    alter table public.leads add constraint leads_client_fk foreign key (client_id) references public.clients(id) on delete set null;
+  end if;
+end $$;
+
+-- ---------- Invoices (revenue = paid invoices) ----------
+create table if not exists public.invoices (
+  id              bigint generated always as identity primary key,
+  client_id       bigint not null references public.clients(id) on delete cascade,
+  invoice_number  text,
+  description     text not null default '',
+  amount          numeric(12, 2) not null check (amount >= 0),
+  issue_date      date not null default current_date,
+  due_date        date,
+  status          text not null default 'sent' check (status in ('draft', 'sent', 'paid', 'cancelled')),
+  paid_date       date,
+  created_by      uuid references public.profiles(id),
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create index if not exists invoices_client_idx on public.invoices (client_id);
+create index if not exists invoices_status_idx on public.invoices (status, paid_date);
+
+-- ---------- Client files (contracts, documents) stored in Supabase Storage ----------
+create table if not exists public.client_files (
+  id            bigint generated always as identity primary key,
+  client_id     bigint not null references public.clients(id) on delete cascade,
+  kind          text not null default 'document' check (kind in ('contract', 'document', 'invoice', 'other')),
+  name          text not null,
+  storage_path  text not null unique,
+  size_bytes    bigint,
+  uploaded_by   uuid references public.profiles(id),
+  created_at    timestamptz not null default now()
+);
+create index if not exists client_files_client_idx on public.client_files (client_id);
+
+-- Can the caller view / edit / delete this client (and its files)?
+create or replace function public.can_client(p_client bigint, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from clients c where c.id = p_client
+                   and (perm('clients', p_action) or (c.project_manager = auth.uid() and pm_perm('clients', p_action))));
+$$;
+
+-- Invoices follow the Finance permission (Project Managers only if their role allows Finance)
+create or replace function public.can_invoice(p_client bigint, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select perm('finance', p_action) or exists (select 1 from clients c where c.id = p_client
+                   and c.project_manager = auth.uid() and pm_perm('finance', p_action));
+$$;
+
+-- ---------- Triggers: timestamps, validation, audit ----------
+create or replace function public.biz_before_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    if tg_table_name = 'client_files' then new.uploaded_by := coalesce(auth.uid(), new.uploaded_by);
+    else new.created_by := coalesce(auth.uid(), new.created_by); new.created_at := now(); end if;
+  end if;
+  if tg_table_name <> 'client_files' then new.updated_at := now(); end if;
+
+  if tg_table_name = 'leads' then
+    if new.status = 'won' and (tg_op = 'INSERT' or old.status <> 'won') then new.won_at := now(); end if;
+    if new.status <> 'won' then new.won_at := null; end if;
+  elsif tg_table_name = 'clients' then
+    if new.project_manager is not null and (tg_op = 'INSERT' or new.project_manager is distinct from old.project_manager)
+       and not exists (select 1 from member_roles where member_id = new.project_manager and role_key = 'project_manager') then
+      raise exception 'Pick a member with the Project Manager role';
+    end if;
+  elsif tg_table_name = 'invoices' then
+    if new.status = 'paid' and new.paid_date is null then new.paid_date := current_date; end if;
+    if new.status <> 'paid' then new.paid_date := null; end if;
+  end if;
+  return new;
+end $$;
+
+create or replace function public.biz_after_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_client text;
+begin
+  if tg_table_name = 'leads' then
+    if tg_op = 'INSERT' then
+      perform log_event('lead_created', 'lead', new.id::text, 'Added lead "' || new.company || '"', jsonb_build_object('source', new.source), new.assigned_to);
+    elsif tg_op = 'UPDATE' and new.status is distinct from old.status then
+      perform log_event(case when new.status = 'won' then 'lead_won' when new.status = 'lost' then 'lead_lost' else 'lead_status_changed' end,
+        'lead', new.id::text, 'Moved lead "' || new.company || '" to ' || new.status,
+        jsonb_build_object('from', old.status, 'to', new.status), new.assigned_to);
+    elsif tg_op = 'DELETE' then
+      perform log_event('lead_deleted', 'lead', old.id::text, 'Deleted lead "' || old.company || '"');
+    end if;
+  elsif tg_table_name = 'clients' then
+    if tg_op = 'INSERT' then
+      perform log_event('client_created', 'client', new.id::text, 'Added client "' || new.name || '"', '{}'::jsonb, new.project_manager);
+    elsif tg_op = 'UPDATE' and new.project_manager is distinct from old.project_manager and new.project_manager is not null then
+      perform log_event('client_pm_assigned', 'client', new.id::text,
+        'Assigned "' || new.name || '" to ' || member_name(new.project_manager), '{}'::jsonb, new.project_manager);
+    elsif tg_op = 'UPDATE' and new.status is distinct from old.status then
+      perform log_event('client_status_changed', 'client', new.id::text, 'Moved client "' || new.name || '" to ' || new.status,
+        jsonb_build_object('from', old.status, 'to', new.status), new.project_manager);
+    elsif tg_op = 'DELETE' then
+      perform log_event('client_deleted', 'client', old.id::text, 'Deleted client "' || old.name || '"');
+    end if;
+  elsif tg_table_name = 'invoices' then
+    select name into v_client from clients where id = coalesce(new.client_id, old.client_id);
+    if tg_op = 'INSERT' then
+      perform log_event('invoice_created', 'client', new.client_id::text,
+        'Added invoice ' || coalesce(new.invoice_number, '#' || new.id) || ' for ' || coalesce(v_client, 'client') || ' (' || new.amount || ')');
+    elsif tg_op = 'UPDATE' and new.status is distinct from old.status then
+      perform log_event(case when new.status = 'paid' then 'invoice_paid' else 'invoice_updated' end, 'client', new.client_id::text,
+        'Invoice ' || coalesce(new.invoice_number, '#' || new.id) || ' for ' || coalesce(v_client, 'client') || ' is ' || new.status);
+    elsif tg_op = 'DELETE' then
+      perform log_event('invoice_deleted', 'client', old.client_id::text, 'Deleted invoice ' || coalesce(old.invoice_number, '#' || old.id));
+    end if;
+  elsif tg_table_name = 'client_files' then
+    select name into v_client from clients where id = coalesce(new.client_id, old.client_id);
+    if tg_op = 'INSERT' then
+      perform log_event('file_uploaded', 'client', new.client_id::text, 'Uploaded ' || new.kind || ' "' || new.name || '" for ' || coalesce(v_client, 'client'));
+    elsif tg_op = 'DELETE' then
+      perform log_event('file_deleted', 'client', old.client_id::text, 'Deleted ' || old.kind || ' "' || old.name || '"');
+    end if;
+  end if;
+  return coalesce(new, old);
+end $$;
+
+do $$ declare t text; begin
+  foreach t in array array['leads', 'clients', 'invoices', 'client_files'] loop
+    execute format('drop trigger if exists %I on public.%I', t || '_before', t);
+    execute format('create trigger %I before insert or update on public.%I for each row execute function public.biz_before_write()', t || '_before', t);
+    execute format('drop trigger if exists %I on public.%I', t || '_after', t);
+    execute format('create trigger %I after insert or update or delete on public.%I for each row execute function public.biz_after_write()', t || '_after', t);
+  end loop;
+end $$;
+
+create or replace function public.permissions_after_update() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform log_event('permission_changed', 'settings', new.role_key || ':' || new.module,
+    'Changed ' || (select name from team_roles where key = new.role_key) || ' access to ' || new.module,
+    jsonb_build_object('view', new.can_view, 'edit', new.can_edit, 'delete', new.can_delete));
+  return new;
+end $$;
+drop trigger if exists role_permissions_log on public.role_permissions;
+create trigger role_permissions_log after update on public.role_permissions
+  for each row execute function public.permissions_after_update();
+
+-- ---------- Won lead → client ----------
+create or replace function public.lead_mark_won(p_lead bigint) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); l leads%rowtype; v_client bigint;
+begin
+  if not perm('leads', 'edit') then raise exception 'You don''t have permission to update leads'; end if;
+  select * into l from leads where id = p_lead for update;
+  if not found then raise exception 'Lead not found'; end if;
+  if l.client_id is not null then
+    update leads set status = 'won' where id = p_lead and status <> 'won';
+    return l.client_id;
+  end if;
+  insert into clients (name, contact_name, email, phone, website, country, notes, lead_id, monthly_retainer, created_by)
+  values (l.company, l.contact_name, l.email, l.phone, l.website, l.country, l.notes, l.id, l.estimated_value, v_uid)
+  returning id into v_client;
+  update leads set status = 'won', client_id = v_client where id = p_lead;
+  return v_client;
+end $$;
+
+-- ---------- Business numbers for the dashboard ----------
+create or replace function public.business_summary() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_tz text := app_tz(); v_today date := (now() at time zone app_tz())::date; v_month date; r jsonb;
+begin
+  if not (perm('finance', 'view') or is_manager()) then raise exception 'You don''t have access to finance'; end if;
+  v_month := date_trunc('month', v_today)::date;
+  select jsonb_build_object(
+    'currency', (select currency from app_settings where id = 1),
+    'revenue_month', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= v_month), 0),
+    'revenue_last_month', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= (v_month - interval '1 month')::date and paid_date < v_month), 0),
+    'revenue_total', coalesce((select sum(amount) from invoices where status = 'paid'), 0),
+    'outstanding', coalesce((select sum(amount) from invoices where status = 'sent'), 0),
+    'overdue_count', (select count(*) from invoices where status = 'sent' and due_date < v_today),
+    'overdue_amount', coalesce((select sum(amount) from invoices where status = 'sent' and due_date < v_today), 0),
+    'mrr', coalesce((select sum(monthly_retainer) from clients where status in ('onboarding', 'active')), 0),
+    'active_clients', (select count(*) from clients where status in ('onboarding', 'active')),
+    'leads_open', (select count(*) from leads where status not in ('won', 'lost')),
+    'leads_month', (select count(*) from leads where (created_at at time zone v_tz)::date >= v_month),
+    'won_month', (select count(*) from leads where status = 'won' and (won_at at time zone v_tz)::date >= v_month),
+    'months', (select coalesce(jsonb_agg(jsonb_build_object('month', to_char(m, 'YYYY-MM'),
+                 'revenue', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= m and paid_date < m + interval '1 month'), 0)) order by m), '[]'::jsonb)
+                 from generate_series(v_month - interval '11 months', v_month, interval '1 month') m)
+  ) into r;
+  return r;
+end $$;
+
+-- ---------- Row Level Security for part 2 ----------
+alter table public.role_permissions enable row level security;
+alter table public.leads            enable row level security;
+alter table public.clients          enable row level security;
+alter table public.invoices         enable row level security;
+alter table public.client_files     enable row level security;
+
+drop policy if exists perms_read on public.role_permissions;
+create policy perms_read on public.role_permissions for select to authenticated using (true);
+drop policy if exists perms_admin_update on public.role_permissions;
+create policy perms_admin_update on public.role_permissions for update to authenticated
+  using ((select public.is_admin())) with check ((select public.is_admin()));
+
+drop policy if exists leads_read on public.leads;
+create policy leads_read on public.leads for select to authenticated using ((select public.perm('leads', 'view')));
+drop policy if exists leads_insert on public.leads;
+create policy leads_insert on public.leads for insert to authenticated with check ((select public.perm('leads', 'edit')));
+drop policy if exists leads_update on public.leads;
+create policy leads_update on public.leads for update to authenticated
+  using ((select public.perm('leads', 'edit'))) with check ((select public.perm('leads', 'edit')));
+drop policy if exists leads_delete on public.leads;
+create policy leads_delete on public.leads for delete to authenticated using ((select public.perm('leads', 'delete')));
+
+drop policy if exists clients_read on public.clients;
+create policy clients_read on public.clients for select to authenticated
+  using ((select public.perm('clients', 'view')) or (project_manager = (select auth.uid()) and (select public.pm_perm('clients', 'view'))));
+drop policy if exists clients_insert on public.clients;
+create policy clients_insert on public.clients for insert to authenticated with check ((select public.perm('clients', 'edit')));
+drop policy if exists clients_update on public.clients;
+create policy clients_update on public.clients for update to authenticated
+  using ((select public.perm('clients', 'edit')) or (project_manager = (select auth.uid()) and (select public.pm_perm('clients', 'edit'))))
+  with check ((select public.perm('clients', 'edit')) or (project_manager = (select auth.uid()) and (select public.pm_perm('clients', 'edit'))));
+drop policy if exists clients_delete on public.clients;
+create policy clients_delete on public.clients for delete to authenticated using ((select public.perm('clients', 'delete')));
+
+drop policy if exists invoices_read on public.invoices;
+create policy invoices_read on public.invoices for select to authenticated using (public.can_invoice(client_id, 'view'));
+drop policy if exists invoices_insert on public.invoices;
+create policy invoices_insert on public.invoices for insert to authenticated with check (public.can_invoice(client_id, 'edit'));
+drop policy if exists invoices_update on public.invoices;
+create policy invoices_update on public.invoices for update to authenticated
+  using (public.can_invoice(client_id, 'edit')) with check (public.can_invoice(client_id, 'edit'));
+drop policy if exists invoices_delete on public.invoices;
+create policy invoices_delete on public.invoices for delete to authenticated using (public.can_invoice(client_id, 'delete'));
+
+drop policy if exists files_read on public.client_files;
+create policy files_read on public.client_files for select to authenticated using (public.can_client(client_id, 'view'));
+drop policy if exists files_insert on public.client_files;
+create policy files_insert on public.client_files for insert to authenticated with check (public.can_client(client_id, 'edit'));
+drop policy if exists files_delete on public.client_files;
+create policy files_delete on public.client_files for delete to authenticated using (public.can_client(client_id, 'delete'));
+
+revoke all on public.role_permissions, public.leads, public.clients, public.invoices, public.client_files from anon, authenticated;
+grant select on public.role_permissions, public.leads, public.clients, public.invoices, public.client_files to authenticated;
+grant update (can_view, can_edit, can_delete) on public.role_permissions to authenticated;
+grant insert, update, delete on public.leads, public.clients, public.invoices to authenticated;
+grant insert, delete on public.client_files to authenticated;
+grant all on public.role_permissions, public.leads, public.clients, public.invoices, public.client_files to service_role;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.biz_before_write(), public.biz_after_write(), public.permissions_after_update() from authenticated;
+grant execute on function
+  public.perm(text, text), public.pm_perm(text, text), public.can_client(bigint, text), public.can_invoice(bigint, text),
+  public.team_directory(), public.lead_mark_won(bigint), public.business_summary()
+to authenticated;
+
+-- ---------- Storage bucket for contracts & documents (Supabase only) ----------
+do $$ begin
+  if exists (select 1 from pg_namespace where nspname = 'storage') then
+    insert into storage.buckets (id, name, public, file_size_limit)
+    values ('client-files', 'client-files', false, 26214400)
+    on conflict (id) do nothing;
+    execute 'drop policy if exists "client files read" on storage.objects';
+    execute 'create policy "client files read" on storage.objects for select to authenticated using (bucket_id = ''client-files'' and public.can_client(((storage.foldername(name))[1])::bigint, ''view''))';
+    execute 'drop policy if exists "client files upload" on storage.objects';
+    execute 'create policy "client files upload" on storage.objects for insert to authenticated with check (bucket_id = ''client-files'' and public.can_client(((storage.foldername(name))[1])::bigint, ''edit''))';
+    execute 'drop policy if exists "client files delete" on storage.objects';
+    execute 'create policy "client files delete" on storage.objects for delete to authenticated using (bucket_id = ''client-files'' and public.can_client(((storage.foldername(name))[1])::bigint, ''delete''))';
+  end if;
+end $$;
 
 -- Done. Next: create your admin user (see README, step 2).

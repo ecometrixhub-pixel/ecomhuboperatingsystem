@@ -236,7 +236,7 @@ ok(s4.end_reason === 'inactive', 'deactivation ends open sessions');
 ok((await q(`select count(*)::int c from task_time_entries where user_id=$1 and ended_at is null`, [M2]))[0].c === 0, 'deactivation pauses timer');
 await expectErr(() => as(M2, () => q(`select session_start('ua','dev','login')`)), 'inactive member cannot start session', /inactive/);
 await expectErr(() => as(A, () => q(`insert into tasks (title, assigned_to) values ('x', $1)`, [M2])), 'cannot assign to inactive member', /active/);
-await expectErr(() => q(`select admin_set_member_status($1,$1,'inactive')`, [A]), 'admin cannot deactivate self', /own status/);
+await expectErr(() => q(`select admin_set_member_status($1,$1,'inactive')`, [A]), 'admin cannot deactivate self', /own status|admin account/);
 
 console.log('Privileges');
 await ex(`set role anon`);
@@ -245,6 +245,85 @@ await expectErr(() => q(`select session_start()`), 'anon cannot call functions',
 await ex(`reset role`);
 await as(M1, () => expectErr(() => q(`select log_event('x','y','z','fake')`), 'members cannot call log_event', /permission/));
 await as(M1, () => expectErr(() => q(`select close_session($1,'logout',now(),false)`, [S2]), 'members cannot call close_session', /permission/));
+
+console.log('Part 2: roles for leads / clients / finance');
+async function mkUser(email, roles) {
+  const [u] = await q(`insert into auth.users (email, email_confirmed_at) values ($1, now()) returning id`, [email]);
+  await q(`select admin_save_member($1,$2,'{}',$3)`, [A, u.id, roles]);
+  return u.id;
+}
+const LG = await mkUser('lg@ecom.com', ['lead_gen']);
+const SR = await mkUser('sr@ecom.com', ['sales_rep']);
+const FN = await mkUser('fn@ecom.com', ['finance']);
+const PM1 = await mkUser('pm1@ecom.com', ['project_manager']);
+const PM2 = await mkUser('pm2@ecom.com', ['project_manager']);
+const MG = await mkUser('mg@ecom.com', ['manager']);
+ok((await q(`select count(*)::int c from role_permissions`))[0].c === 18, 'default permissions seeded for 6 roles');
+
+const [lead] = await as(LG, () => q(`insert into leads (company, contact_name, source, estimated_value) values ('GlowCo', 'Amy', 'Instagram', 1500) returning id, created_by`));
+ok(lead.created_by === LG, 'lead generator adds a lead (created_by forced)');
+await as(LG, async () => {
+  await q(`delete from leads where id=$1`, [lead.id]);
+  ok((await q(`select count(*)::int c from leads`))[0].c === 1, 'lead generator cannot delete leads');
+  ok((await q(`select count(*)::int c from clients`))[0].c === 0, 'lead generator cannot see clients');
+  ok((await q(`select count(*)::int c from team_directory()`))[0].c >= 6, 'team directory works for members');
+});
+await as(FN, async () => {
+  ok((await q(`select count(*)::int c from leads`))[0].c === 0, 'finance cannot see leads by default');
+  await expectErr(() => q(`insert into leads (company) values ('x')`), 'finance cannot add leads', /row-level/);
+});
+let clientId;
+await as(SR, async () => {
+  ok((await q(`select count(*)::int c from leads`))[0].c === 1, 'sales rep sees the lead');
+  await q(`update leads set status='contacted' where id=$1`, [lead.id]);
+  clientId = (await q(`select lead_mark_won($1) as id`, [lead.id]))[0].id;
+  const [l] = await q(`select status, client_id, won_at is not null as w from leads where id=$1`, [lead.id]);
+  ok(l.status === 'won' && l.client_id == clientId && l.w, 'won lead turns into a client');
+  const cl = await q(`select name, monthly_retainer from clients`);
+  ok(cl.length === 1 && cl[0].name === 'GlowCo' && Number(cl[0].monthly_retainer) === 1500, 'sales rep can view clients; client copied from lead');
+  const up = await q(`update clients set notes='x' where id=$1 returning id`, [clientId]);
+  ok(up.length === 0, 'sales rep cannot edit clients by default');
+  await expectErr(() => q(`select business_summary()`), 'sales rep cannot see revenue', /finance/);
+});
+await as(MG, async () => {
+  await expectErr(() => q(`update clients set project_manager=$1 where id=$2`, [SR, clientId]), 'only Project Manager role can be assigned', /Project Manager/);
+  await q(`update clients set project_manager=$1, status='active' where id=$2`, [PM1, clientId]);
+  ok((await q(`select count(*)::int c from team_presence()`))[0].c >= 1, 'manager can view team presence like admin');
+  await q(`insert into tasks (title, assigned_to) values ('Manager task', $1)`, [SR]);
+  ok(true, 'manager can create tasks');
+  const s = await q(`update app_settings set idle_minutes=9 where id=1 returning id`);
+  ok(s.length === 0, 'manager cannot change workspace settings');
+});
+await expectErr(() => q(`select admin_set_member_status($1,$2,'inactive')`, [MG, A]), 'manager cannot deactivate the admin', /admin account/);
+await q(`select admin_save_member($1,$2,'{"job_title":"Caller"}',null)`, [MG, LG]);
+ok(true, 'manager can edit members through the server function');
+await expectErr(() => q(`select admin_save_member($1,$2,'{"first_name":"X"}',null)`, [MG, A]), 'manager cannot edit the admin account', /admin/);
+await q(`insert into clients (name) values ('Other client')`);
+await as(PM1, async () => {
+  const cl = await q(`select id from clients`);
+  ok(cl.length === 1 && cl[0].id == clientId, 'project manager sees only assigned clients');
+  ok((await q(`update clients set notes='kickoff done' where id=$1 returning id`, [clientId])).length === 1, 'project manager can edit assigned client');
+});
+await as(PM2, async () => ok((await q(`select count(*)::int c from clients`))[0].c === 0, 'other project manager sees nothing'));
+await as(FN, async () => {
+  await q(`insert into invoices (client_id, invoice_number, amount, due_date) values ($1,'INV-001',1500,current_date - 3), ($1,'INV-002',800,current_date + 10)`, [clientId]);
+  await q(`update invoices set status='paid' where invoice_number='INV-001'`);
+  const b = (await q(`select business_summary() as b`))[0].b;
+  ok(Number(b.revenue_month) === 1500 && Number(b.outstanding) === 800 && b.active_clients === 2 && b.won_month === 1 && b.months.length === 12,
+    `finance sees revenue: month=${b.revenue_month} outstanding=${b.outstanding} clients=${b.active_clients} won=${b.won_month}`);
+  ok((await q(`select paid_date is not null as p from invoices where invoice_number='INV-001'`))[0].p, 'paid date set automatically');
+});
+await as(PM1, async () => ok((await q(`select count(*)::int c from invoices`))[0].c === 0, 'project manager cannot see invoices by default'));
+await as(SR, async () => {
+  const r = await q(`update role_permissions set can_view=true where role_key='finance' and module='leads' returning role_key`);
+  ok(r.length === 0, 'members cannot change permissions');
+});
+await as(A, async () => {
+  await q(`update role_permissions set can_view=true where role_key='finance' and module='leads'`);
+});
+await as(FN, async () => ok((await q(`select count(*)::int c from leads`))[0].c === 1, 'admin toggle gives finance access to leads'));
+const acts2 = (await q(`select distinct action from activity_logs where action in ('lead_created','lead_won','client_created','client_pm_assigned','invoice_created','invoice_paid','permission_changed')`)).map((r) => r.action);
+ok(acts2.length === 7, 'business events logged: ' + acts2.sort().join(','));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

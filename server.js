@@ -16,7 +16,7 @@ const db = configured
   ? createClient(SUPABASE_URL, SECRET_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 
-const ROLE_KEYS = ['sales_rep', 'lead_gen', 'cold_caller', 'finance', 'manager'];
+const ROLE_KEYS = ['sales_rep', 'lead_gen', 'cold_caller', 'finance', 'manager', 'project_manager'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -109,8 +109,9 @@ const requireAdmin = wrap(async (req, res, next) => {
   if (!token) throw new HttpError(401, 'Sign in again to continue');
   const { data, error } = await db.auth.getUser(token);
   if (error || !data?.user) throw new HttpError(401, 'Your session has expired. Sign in again.');
-  const { data: profile } = await db.from('profiles').select('id, email, first_name, last_name, role, status').eq('id', data.user.id).single();
-  if (!profile || profile.role !== 'admin' || profile.status !== 'active') throw new HttpError(403, 'Only the admin can do this');
+  const { data: profile } = await db.from('profiles').select('id, email, first_name, last_name, role, status, member_roles(role_key)').eq('id', data.user.id).single();
+  const isManager = profile?.role === 'admin' || (profile?.member_roles || []).some((r) => r.role_key === 'manager');
+  if (!profile || !isManager || profile.status !== 'active') throw new HttpError(403, 'Only the admin or a manager can do this');
   req.admin = profile;
   next();
 });
@@ -193,8 +194,9 @@ api.post('/members/:id/status', requireAdmin, wrap(async (req, res) => {
 
 // New invite link (not joined yet) or password reset link (joined)
 api.post('/members/:id/access-link', requireAdmin, wrap(async (req, res) => {
-  const { data: target } = await db.from('profiles').select('id, email, first_name, last_name, status').eq('id', req.params.id).maybeSingle();
+  const { data: target } = await db.from('profiles').select('id, email, first_name, last_name, status, role').eq('id', req.params.id).maybeSingle();
   if (!target) throw new HttpError(404, 'Member not found');
+  if (target.role === 'admin' && req.admin.role !== 'admin') throw new HttpError(403, 'Only the admin can get a link for the admin account');
   if (['inactive', 'suspended'].includes(target.status)) throw new HttpError(400, 'Activate this member first');
   const redirectTo = `${siteOrigin(req)}/set-password.html`;
   const result = await accessLink(target.email, target.status === 'invited', redirectTo, {

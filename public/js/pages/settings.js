@@ -25,6 +25,9 @@ export async function render({ el }) {
               <span class="hint">Days, weeks and months in reports start at midnight in this timezone.</span></div>
             <div class="field"><label for="ws-idle">Mark idle after (minutes)</label><input id="ws-idle" class="input" type="number" min="1" max="60" value="${esc(s.idle_minutes)}">
               <span class="hint">No click, key press or scroll in EcomHub OS for this long counts as idle.</span></div>
+            <div class="field"><label for="ws-cur">Currency</label>
+              <select id="ws-cur" class="select">${['USD', 'GBP', 'EUR', 'PKR', 'AED', 'CAD', 'AUD', 'SAR'].map((c) => `<option ${c === (s.currency || 'USD') ? 'selected' : ''}>${c}</option>`).join('')}</select>
+              <span class="hint">Used for invoices, revenue and lead values.</span></div>
             <div class="span-2"><button class="btn btn-primary" type="submit">Save workspace settings</button></div>
           </form>
         </div>
@@ -40,6 +43,7 @@ export async function render({ el }) {
       company_name: form.querySelector('#ws-name').value.trim() || 'Ecometrix Hub',
       timezone: form.querySelector('#ws-tz').value,
       idle_minutes: Math.min(60, Math.max(1, parseInt(form.querySelector('#ws-idle').value, 10) || 5)),
+      currency: form.querySelector('#ws-cur').value,
     };
     busy(form.querySelector('[type=submit]'), async () => {
       try {

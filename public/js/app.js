@@ -1,6 +1,6 @@
 // App shell: boot, role-based navigation, hash router.
 import { supabase } from './supabase.js';
-import { state } from './state.js';
+import { state, computePerms, can, canAny } from './state.js';
 import { q } from './data.js';
 import { setTimezone } from './time.js';
 import { startTracking, endTracking } from './tracker.js';
@@ -10,19 +10,34 @@ import { esc, icon, avatar, fullName, closeDrawer, ROLE_ICONS, toast } from './u
 const ADMIN_NAV = [
   { route: 'dashboard', label: 'Dashboard', icon: 'dashboard', page: 'admin-dashboard' },
   { route: 'team', label: 'Team', icon: 'users', page: 'team' },
+  { route: 'permissions', label: 'Permissions', icon: 'shield', page: 'permissions', owner: true },
   { route: 'tasks', label: 'Tasks', icon: 'tasks', page: 'tasks' },
+  { route: 'leads', label: 'Leads', icon: 'target', page: 'leads' },
+  { route: 'clients', label: 'Clients', icon: 'briefcase', page: 'clients' },
+  { route: 'finance', label: 'Finance', icon: 'wallet', page: 'finance' },
   { route: 'tracking', label: 'Work tracking', icon: 'chart', page: 'tracking' },
   { route: 'logins', label: 'Login history', icon: 'login', page: 'logins' },
   { route: 'logs', label: 'Activity logs', icon: 'activity', page: 'logs' },
-  { route: 'settings', label: 'Settings', icon: 'settings', page: 'settings' },
+  { route: 'settings', label: 'Settings', icon: 'settings', page: 'settings', owner: true },
 ];
-const MEMBER_NAV = [
-  { route: 'home', label: 'Dashboard', icon: 'home', page: 'member-home' },
+// Extra items a manager (non-admin) gets for their own work
+const MANAGER_SELF = [
   { route: 'my-tasks', label: 'My tasks', icon: 'tasks', page: 'my-tasks' },
   { route: 'my-time', label: 'My work time', icon: 'clock', page: 'tracking' },
-  { route: 'my-activity', label: 'My activity', icon: 'activity', page: 'my-activity' },
   { route: 'profile', label: 'Profile', icon: 'user', page: 'profile' },
 ];
+function memberNav() {
+  return [
+    { route: 'home', label: 'Dashboard', icon: 'home', page: 'member-home' },
+    { route: 'my-tasks', label: 'My tasks', icon: 'tasks', page: 'my-tasks' },
+    can('leads') && { route: 'leads', label: 'Leads', icon: 'target', page: 'leads' },
+    canAny('clients') && { route: 'clients', label: state.perms.clients?.view ? 'Clients' : 'My clients', icon: 'briefcase', page: 'clients' },
+    can('finance') && { route: 'finance', label: 'Finance', icon: 'wallet', page: 'finance' },
+    { route: 'my-time', label: 'My work time', icon: 'clock', page: 'tracking' },
+    { route: 'my-activity', label: 'My activity', icon: 'activity', page: 'my-activity' },
+    { route: 'profile', label: 'Profile', icon: 'user', page: 'profile' },
+  ].filter(Boolean);
+}
 
 let signingOut = false;
 let cleanup = null;
@@ -32,10 +47,11 @@ async function boot() {
   if (!session) return location.replace('/login.html');
   state.user = session.user;
 
-  const [profile, roles, settings] = await Promise.all([
+  const [profile, roles, settings, permRows] = await Promise.all([
     q(supabase.from('profiles').select('*, member_roles(role_key)').eq('id', session.user.id).maybeSingle()),
     q(supabase.from('team_roles').select('*').order('sort')),
     q(supabase.from('app_settings').select('*').eq('id', 1).maybeSingle()),
+    q(supabase.from('role_permissions').select('*')).catch(() => []),
   ]);
   if (!profile) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
   if (['inactive', 'suspended'].includes(profile.status)) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
@@ -44,7 +60,10 @@ async function boot() {
   state.myRoles = (profile.member_roles || []).map((r) => r.role_key).sort((a, b) => roles.findIndex((x) => x.key === a) - roles.findIndex((x) => x.key === b));
   state.roles = roles;
   state.settings = settings || { timezone: 'Asia/Karachi', idle_minutes: 5, company_name: 'Ecometrix Hub' };
-  state.isAdmin = profile.role === 'admin';
+  state.isOwner = profile.role === 'admin';
+  state.isAdmin = state.isOwner || state.myRoles.includes('manager');
+  state.permRows = permRows || [];
+  computePerms();
   setTimezone(state.settings.timezone);
 
   let fresh = false;
@@ -71,13 +90,15 @@ async function boot() {
 }
 
 function navItems() {
-  return state.isAdmin ? ADMIN_NAV : MEMBER_NAV;
+  if (!state.isAdmin) return memberNav();
+  const items = ADMIN_NAV.filter((n) => !n.owner || state.isOwner);
+  return state.isOwner ? items : items.concat(MANAGER_SELF);
 }
 
 function renderShell() {
   const p = state.profile;
   const nav = navItems();
-  const roleLinks = !state.isAdmin && state.myRoles.length ? `
+  const roleLinks = !state.isOwner && state.myRoles.length ? `
     <div class="nav-title">My roles</div>
     ${state.myRoles.map((key) => {
       const r = state.roles.find((x) => x.key === key);
@@ -92,13 +113,13 @@ function renderShell() {
           <div class="brand-name">EcomHub OS<small>${esc(state.settings.company_name || 'Ecometrix Hub')}</small></div>
         </div>
         <nav class="nav">
-          ${nav.map((n) => `<a href="#/${n.route}" data-route="${n.route}">${icon(n.icon)}<span>${n.label}</span></a>`).join('')}
+          ${nav.map((n) => `${n.route === 'my-tasks' && state.isAdmin ? '<div class="nav-title">My work</div>' : ''}<a href="#/${n.route}" data-route="${n.route}">${icon(n.icon)}<span>${n.label}</span></a>`).join('')}
           ${roleLinks}
         </nav>
         <div class="sidebar-foot">
-          <p class="tracking-note">${icon('shield', 13)}<span>Sign-ins, active time and task timers are recorded. ${state.isAdmin ? '' : '<a href="#/my-activity">See your records</a>'}</span></p>
+          <p class="tracking-note">${icon('shield', 13)}<span>Sign-ins, active time and task timers are recorded. ${state.isOwner ? '' : '<a href="#/my-activity">See your records</a>'}</span></p>
           <div class="me">
-            <div class="who">${avatar(p)}<div><div class="name">${esc(fullName(p))}</div><div class="sub">${state.isAdmin ? 'Admin' : esc(p.job_title || 'Team member')}</div></div></div>
+            <div class="who">${avatar(p)}<div><div class="name">${esc(fullName(p))}</div><div class="sub">${state.isOwner ? 'Admin' : state.isAdmin ? 'Manager' : esc(p.job_title || 'Team member')}</div></div></div>
             <button class="btn btn-ghost btn-icon btn-sm" id="signout" title="Sign out" aria-label="Sign out">${icon('logout')}</button>
           </div>
         </div>
@@ -143,7 +164,7 @@ async function route() {
   let item = nav.find((n) => n.route === path);
   let arg = null;
 
-  if (!item && !state.isAdmin && path.startsWith('role/')) {
+  if (!item && !state.isOwner && path.startsWith('role/')) {
     arg = path.slice(5);
     if (state.myRoles.includes(arg)) item = { route: path, page: 'my-tasks', label: state.roles.find((r) => r.key === arg)?.name };
   }

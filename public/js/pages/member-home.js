@@ -7,6 +7,8 @@ import { todayStr, fmtLongDay, fmtDuration, fmtClock, fmtTime, greeting, dueLabe
 import { ribbon, ribbonAxis, ribbonLegend, statsStrip, logItem } from '../components.js';
 import { liveAttrs, runningTimer, startTimer, pauseTimer, stopTimer, onTimerChange, timerStateFor } from '../timer.js';
 import { openTaskDrawer } from '../task-drawer.js';
+import { can } from '../state.js';
+import { loadBusiness, businessPanel, businessError } from '../business.js';
 
 const PRIO = { urgent: 0, high: 1, medium: 2, low: 3 };
 
@@ -21,7 +23,8 @@ export async function render({ el }) {
 
   async function load() {
     const today = todayStr();
-    const [tasks, timeline, report, logs] = await Promise.all([
+    const [biz, tasks, timeline, report, logs] = await Promise.all([
+      can('finance') ? loadBusiness().catch((e) => ({ error: e })) : Promise.resolve(null),
       q(supabase.from('tasks').select(TASK_FIELDS).eq('assigned_to', state.profile.id)),
       rpc('day_timeline', { p_day: today, p_user: state.profile.id }),
       rpc('report_daily', { p_from: today, p_to: today, p_user: state.profile.id }),
@@ -60,6 +63,7 @@ export async function render({ el }) {
     }
 
     box.innerHTML = `
+      ${biz ? `<div style="margin-bottom:20px">${biz.error ? businessError(biz.error) : businessPanel(biz, { compact: true })}</div>` : ''}
       ${timerCard}
       <section class="panel" style="margin:20px 0">
         <div class="panel-head"><div><h2>Your day</h2><p>Signed in ${fmtDuration(day.session_seconds)}, active ${fmtDuration(day.active_seconds)}, ${fmtDuration(day.timer_seconds)} on tasks</p></div>${ribbonLegend()}</div>

@@ -64,3 +64,13 @@ export async function loadTotals(taskIds) {
   map.fetchedAt = Date.now();
   return map;
 }
+
+// Names + roles of everyone (safe for any member; no emails or phones)
+let dirCache = null; let dirAt = 0;
+export async function loadDirectory(force = false) {
+  if (!force && dirCache && Date.now() - dirAt < 60_000) return dirCache;
+  dirCache = await rpc('team_directory');
+  dirAt = Date.now();
+  return dirCache;
+}
+export const dirName = (dir, id) => dir.find((d) => d.id === id)?.name || '';

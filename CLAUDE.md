@@ -6,8 +6,11 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 ## Scope (don't expand without being asked)
 - Single workspace. No multi-tenant, no "add business", no billing, no subscriptions.
 - Two account types: `admin` (manages everything) and `member` (works on tasks assigned to them).
-- Team roles (a member can hold several, each adds a sidebar tab): Sales Representative `sales_rep`, Lead Generation `lead_gen`, Cold Caller `cold_caller`, Finance `finance`, Manager `manager`.
-- Not built yet on purpose: file attachments (members paste Drive links in comments), timer corrections, custom SMTP. Build only when asked.
+- Team roles (a member can hold several, each adds a sidebar tab): Sales Representative `sales_rep`, Lead Generation `lead_gen`, Cold Caller `cold_caller`, Finance `finance`, Manager `manager`, Project Manager `project_manager`.
+- **Manager role = admin-level access** (`is_manager()` in SQL, `state.isAdmin` in JS) except Settings and Permissions, which only the admin account (`state.isOwner`) can change.
+- Business modules: Leads → (Mark as won → `lead_mark_won`) → Clients (onboarding, PM, invoices, contracts/files in Storage bucket `client-files`) → Finance (revenue = paid invoices, `business_summary()`).
+- Module access per role lives in `role_permissions` (leads / clients / finance × view / edit / delete), edited on the Permissions page. SQL checks: `perm()`, `pm_perm()`, `can_client()`, `can_invoice()`. Project Manager access applies only to clients where `clients.project_manager` is them.
+- Not built yet on purpose: task file attachments (members paste Drive links in comments), timer corrections, custom SMTP. Build only when asked.
 
 ## Stack — keep it this way
 - Frontend: plain HTML, CSS, vanilla JS ES modules in `public/`. **No React/Vue/Next, no bundler, no build step.**
@@ -19,7 +22,7 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 ```bash
 npm install
 npm run dev      # http://localhost:3000 (needs .env, see .env.example)
-npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (70 checks)
+npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (98 checks)
 ```
 
 ## Where things live
@@ -69,7 +72,7 @@ npm test         # runs supabase/schema.sql in an in-memory Postgres and checks 
 - Use real data only. No fake stats or demo accounts.
 
 ## Adding a new team role
-Insert into `team_roles` (in `schema.sql`), add the key to `ROLE_KEYS` in `server.js`, add `--role-<key>` + `[data-role="<key>"]` in `app.css`, and an icon in `ROLE_ICONS` (`ui.js`).
+Insert into `team_roles` and default rows into `role_permissions` (in `schema.sql`), add the key to `ROLE_KEYS` in `server.js`, add `--role-<key>` + `[data-role="<key>"]` in `app.css`, and an icon in `ROLE_ICONS` (`ui.js`).
 
 ## Before saying something is done
 Run `npm test`, run `node --check` on changed JS files, and open the changed page in the browser. Say clearly what was verified and what wasn't (e.g. anything that needs the live Supabase project).

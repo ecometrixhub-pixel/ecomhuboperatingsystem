@@ -130,7 +130,9 @@ export function openTaskDrawer(taskId) {
       foot += `<button class="btn btn-ghost btn-danger" data-act="delete">${icon('trash', 14)}Delete</button><span style="flex:1"></span>`;
       foot += `<button class="btn" data-act="edit">${icon('edit', 14)}Edit</button>`;
       if (task.status === 'in_review') foot += `<button class="btn" data-act="changes">${icon('undo', 14)}Request changes</button><button class="btn btn-success" data-act="approve">${icon('check', 14)}Approve</button>`;
-    } else if (mine) {
+    }
+    if (mine) {
+      if (state.isAdmin) foot += '<span style="flex-basis:100%;height:0"></span>';
       if (task.status === 'todo') foot += `<button class="btn" data-act="to-progress">Mark in progress</button>`;
       if (task.status === 'in_progress') foot += `<button class="btn btn-ghost" data-act="to-todo">Move back to To do</button>`;
       if (['todo', 'in_progress'].includes(task.status)) foot += `<button class="btn btn-primary" data-act="submit">${icon('send', 14)}Submit for review</button>`;
