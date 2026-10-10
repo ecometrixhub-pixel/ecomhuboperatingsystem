@@ -628,3 +628,68 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .file-row .title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dropzone { border: 1.5px dashed var(--line-2); border-radius: var(--r-md); padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
 .role-panel { margin-bottom: 20px; }
+
+/* ---------- Lead form (soft inputs, icon header) ---------- */
+.mh-icon { width: 40px; height: 40px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); display: grid; place-items: center; flex: none; }
+.modal-head.lead-head { align-items: flex-start; gap: 14px; }
+.modal-head .sub { font-size: 13px; color: var(--muted); font-weight: 400; margin-top: 2px; }
+.lead-form .input, .lead-form .select, .lead-form .textarea { background-color: var(--canvas); border-radius: 10px; height: 44px; }
+.lead-form .textarea { height: auto; min-height: 88px; }
+.lead-form .input:focus, .lead-form .select:focus, .lead-form .textarea:focus { background-color: var(--bg); }
+.lead-form .field > .input:not(:first-child) { margin-top: 6px; }
+.lead-form .field > label { font-weight: 600; color: var(--ink); }
+.req { color: var(--error); }
+.money-input { position: relative; }
+.money-input span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 12.5px; font-weight: 600; color: var(--muted); pointer-events: none; }
+.money-input .input { padding-left: 52px; }
+
+/* ---------- Leads table (pipeline view) ---------- */
+.table.caps th { text-transform: uppercase; letter-spacing: .05em; font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--bg); padding-top: 14px; padding-bottom: 14px; }
+.table.caps td { padding-top: 14px; padding-bottom: 14px; }
+.stage-select {
+  appearance: none; border: 1px solid var(--accent-soft); background: var(--accent-bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%234338CA' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+  color: var(--accent-ink); font-weight: 600; font-size: 13px; height: 34px; padding: 0 30px 0 14px; border-radius: 9px; cursor: pointer; min-width: 132px;
+}
+.stage-select[data-stage="won"] { background-color: var(--success-bg); border-color: #BBF7D0; color: #15803D; }
+.stage-select[data-stage="lost"] { background-color: var(--error-bg); border-color: #FECACA; color: #B91C1C; }
+.stage-select[data-stage="negotiation"], .stage-select[data-stage="proposal"] { background-color: var(--warning-bg); border-color: #FDE68A; color: #B45309; }
+.stage-select:disabled { cursor: default; opacity: 1; }
+.prio-pill { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; border: 1px solid; }
+.prio-pill.low { color: var(--muted); border-color: var(--line); background: var(--canvas); }
+.prio-pill.medium { color: #B45309; border-color: #FDE68A; background: var(--warning-bg); }
+.prio-pill.high { color: #C2410C; border-color: #FED7AA; background: #FFF7ED; }
+.prio-pill.urgent { color: #B91C1C; border-color: #FECACA; background: var(--error-bg); }
+.outreach { display: flex; gap: 6px; }
+.outreach a, .outreach span { width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); display: grid; place-items: center; color: var(--accent); background: var(--bg); text-decoration: none; }
+.outreach a:hover { background: var(--accent-bg); }
+.outreach a.wa { color: #16A34A; background: var(--success-bg); border-color: #BBF7D0; }
+.outreach span { color: var(--line-2); }
+.btn-soft { background: var(--accent-bg); border-color: transparent; color: var(--accent-ink); }
+.btn-soft:hover { background: #E0E7FF; }
+.mini-av { width: 26px; height: 26px; border-radius: 50%; background: var(--accent-bg); color: var(--accent-ink); font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; flex: none; }
+.client-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #15803D; margin-top: 4px; }
+
+/* ---------- Public page ---------- */
+.public-page { background: var(--canvas); }
+.public-wrap { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+.public-card { overflow: hidden; }
+
+/* ---------- Notifications ---------- */
+.bell { position: relative; }
+.bell .dot { position: absolute; top: 3px; right: 3px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--error); color: #fff; font-size: 10.5px; font-weight: 700; display: grid; place-items: center; border: 2px solid #fff; }
+.notif-panel { position: fixed; z-index: 75; top: 56px; right: 16px; width: min(400px, calc(100vw - 24px)); max-height: min(560px, calc(100vh - 80px)); display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); animation: pop2 .15s ease-out; }
+.notif-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.notif-list { overflow-y: auto; }
+.notif { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); cursor: pointer; text-align: left; width: 100%; background: none; border-left: 0; border-right: 0; border-bottom: 0; }
+.notif:first-child { border-top: 0; }
+.notif:hover { background: var(--canvas); }
+.notif.unread { background: #F8F9FF; }
+.notif .ic { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; flex: none; background: var(--section); color: var(--ink-2); }
+.notif .ic.task, .notif .ic.review { background: var(--accent-bg); color: var(--accent); }
+.notif .ic.lead { background: #ECFEFF; color: #0E7490; }
+.notif .ic.client { background: #FDF2F8; color: #BE185D; }
+.notif .ic.finance { background: var(--success-bg); color: #15803D; }
+.notif .t { font-weight: 500; font-size: 13.5px; line-height: 1.35; }
+.notif .b { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.notif .w { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.notif .u { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 6px; flex: none; }

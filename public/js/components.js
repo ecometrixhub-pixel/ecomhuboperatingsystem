@@ -109,14 +109,15 @@ export const EVENT_LABELS = {
   lead_created: 'Lead added', lead_status_changed: 'Lead updated', lead_won: 'Lead won', lead_lost: 'Lead lost', lead_deleted: 'Lead deleted',
   client_created: 'Client added', client_pm_assigned: 'PM assigned', client_status_changed: 'Client updated', client_deleted: 'Client deleted',
   invoice_created: 'Invoice added', invoice_paid: 'Invoice paid', invoice_updated: 'Invoice updated', invoice_deleted: 'Invoice deleted',
-  file_uploaded: 'File uploaded', file_deleted: 'File deleted',
+  file_uploaded: 'File uploaded', file_deleted: 'File deleted', lead_converted: 'Converted to client',
+  client_agent_added: 'Agent added', client_agent_removed: 'Agent removed',
 };
 export const EVENT_GROUPS = [
   ['Sign-ins', ['login', 'logout']],
   ['Tasks', ['task_created', 'task_assigned', 'task_reassigned', 'task_updated', 'task_status_changed', 'task_submitted', 'task_approved', 'revision_requested']],
   ['Timers', ['timer_started', 'timer_paused', 'timer_resumed', 'timer_stopped']],
   ['Team', ['member_invited', 'invite_accepted', 'member_activated', 'member_deactivated', 'member_roles_changed', 'invite_resent', 'reset_link_created']],
-  ['Leads & clients', ['lead_created', 'lead_status_changed', 'lead_won', 'lead_lost', 'lead_deleted', 'client_created', 'client_pm_assigned', 'client_status_changed', 'client_deleted', 'file_uploaded', 'file_deleted']],
+  ['Leads & clients', ['lead_created', 'lead_status_changed', 'lead_won', 'lead_lost', 'lead_converted', 'lead_deleted', 'client_agent_added', 'client_agent_removed', 'client_created', 'client_pm_assigned', 'client_status_changed', 'client_deleted', 'file_uploaded', 'file_deleted']],
   ['Finance', ['invoice_created', 'invoice_paid', 'invoice_updated', 'invoice_deleted']],
   ['Settings', ['settings_changed', 'permission_changed', 'admin_provisioned']],
 ];

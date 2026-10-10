@@ -59,6 +59,9 @@ HTML + CSS + JavaScript (frontend), Node/Express (server), Supabase (database + 
   Ek member ke multiple roles ho sakte hain. Jitne roles, utne tabs uske sidebar mein (jaise Cold Caller + Lead Generation = 2 tabs).
 - Task banate waqt **Role** chuno → "Assign to" list mein sirf us role wale members aate hain → task us member ke **My tasks** aur us role ke tab mein foran dikhta hai.
 
+## Public lead form
+Leads → **Share lead form** se link milta hai: `https://aapka-link/lead-form.html`. Login nahi chahiye. Agent list mein Lead Generation role wale members aate hain, aur "Other" pe naam type hota hai. Nayi lead pe admin aur managers ko notification jati hai.
+
 ## Tracking kya record hota hai
 | Cheez | Matlab |
 |---|---|

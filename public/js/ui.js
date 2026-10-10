@@ -67,6 +67,11 @@ const P = {
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
   trophy: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/><path d="M12 15v4"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  userPlus: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/>',
+  share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+  chat: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  arrowRight: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   mail: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
 };
 
@@ -165,7 +170,7 @@ export function closeDrawer() {
 export const drawerOpen = () => Boolean(drawerState);
 
 // ---------- Modal ----------
-export function openModal({ title, body = '', foot = '', wide = false, onClose } = {}) {
+export function openModal({ title, body = '', foot = '', wide = false, onClose, icon: ic = null, subtitle = '' } = {}) {
   const scrim = document.createElement('div');
   scrim.className = 'scrim top';
   const el = document.createElement('div');
@@ -173,7 +178,7 @@ export function openModal({ title, body = '', foot = '', wide = false, onClose }
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-modal', 'true');
   el.innerHTML = `
-    <div class="modal-head"><h2>${title}</h2><button class="btn btn-ghost btn-icon btn-sm" data-close aria-label="Close">${icon('x')}</button></div>
+    <div class="modal-head ${ic ? 'lead-head' : ''}">${ic ? `<span class="mh-icon">${icon(ic, 20)}</span>` : ''}<h2>${title}${subtitle ? `<div class="sub">${subtitle}</div>` : ''}</h2><button class="btn btn-ghost btn-icon btn-sm" data-close aria-label="Close">${icon('x')}</button></div>
     <div class="modal-body">${body}</div>
     ${foot ? `<div class="modal-foot">${foot}</div>` : ''}`;
   document.body.append(scrim, el);

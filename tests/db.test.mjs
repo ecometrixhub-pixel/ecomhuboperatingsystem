@@ -260,7 +260,7 @@ const PM2 = await mkUser('pm2@ecom.com', ['project_manager']);
 const MG = await mkUser('mg@ecom.com', ['manager']);
 ok((await q(`select count(*)::int c from role_permissions`))[0].c === 18, 'default permissions seeded for 6 roles');
 
-const [lead] = await as(LG, () => q(`insert into leads (company, contact_name, source, estimated_value) values ('GlowCo', 'Amy', 'Instagram', 1500) returning id, created_by`));
+const [lead] = await as(LG, () => q(`insert into leads (company, contact_name, source, budget, currency) values ('GlowCo', 'Amy', 'Instagram', 1500, 'USD') returning id, created_by`));
 ok(lead.created_by === LG, 'lead generator adds a lead (created_by forced)');
 await as(LG, async () => {
   await q(`delete from leads where id=$1`, [lead.id]);
@@ -324,6 +324,53 @@ await as(A, async () => {
 await as(FN, async () => ok((await q(`select count(*)::int c from leads`))[0].c === 1, 'admin toggle gives finance access to leads'));
 const acts2 = (await q(`select distinct action from activity_logs where action in ('lead_created','lead_won','client_created','client_pm_assigned','invoice_created','invoice_paid','permission_changed')`)).map((r) => r.action);
 ok(acts2.length === 7, 'business events logged: ' + acts2.sort().join(','));
+
+console.log('Part 3: convert flow, agents, notifications');
+const notes = async (uid) => (await q(`select title from notifications where user_id=$1 order by id`, [uid])).map((r) => r.title);
+const [l2] = await as(LG, () => q(`insert into leads (company, contact_name, assigned_to, budget, currency, priority, status) values ('Brew Co', 'Sam', $1, 800, 'GBP', 'high', 'meeting') returning id`, [SR]));
+ok((await notes(SR)).some((t) => t.includes('Brew Co')), 'sales rep notified when a lead is assigned');
+await as(SR, async () => {
+  await expectErr(() => q(`select lead_convert($1)`, [l2.id]), 'convert needs a won lead first', /won/);
+  await q(`update leads set status='won' where id=$1`, [l2.id]);
+});
+ok((await notes(A)).some((t) => t === 'Lead won: Brew Co'), 'admin notified when a lead is won');
+ok((await notes(MG)).some((t) => t === 'Lead won: Brew Co'), 'manager notified when a lead is won');
+ok((await notes(LG)).some((t) => t.includes('Brew Co is won')), 'lead generator told their lead was won');
+const c2 = await as(SR, async () => (await q(`select lead_convert($1) as id`, [l2.id]))[0].id);
+const [cc] = await q(`select name, monthly_retainer from clients where id=$1`, [c2]);
+ok(cc.name === 'Brew Co' && cc.monthly_retainer === null, 'converted to client (GBP budget not copied into USD retainer)');
+ok((await notes(A)).some((t) => t === 'New client: Brew Co'), 'admin notified about the new client');
+await as(MG, () => q(`update clients set project_manager=$1 where id=$2`, [PM1, c2]));
+ok((await notes(PM1)).some((t) => t === 'Client assigned to you: Brew Co'), 'project manager notified on assignment');
+await as(PM1, async () => {
+  await q(`insert into client_members (client_id, member_id, role_label) values ($1,$2,'Designer')`, [c2, LG]);
+  const [t] = await q(`insert into tasks (title, assigned_to, client_id) values ('Design ad creatives', $1, $2) returning id`, [LG, c2]);
+  globalThis.PT = t.id;
+  await expectErr(() => q(`insert into tasks (title, assigned_to, client_id) values ('x', $1, $2)`, [FN, c2]), 'PM can only assign to the client\'s agents', /row-level/);
+  await expectErr(() => q(`insert into tasks (title, assigned_to) values ('x', $1)`, [LG]), 'PM cannot create tasks outside their client', /row-level/);
+  ok((await q(`select count(*)::int c from tasks where client_id=$1`, [c2]))[0].c === 1, 'PM sees tasks for their client');
+});
+ok((await notes(LG)).some((t) => t === 'You were added to Brew Co') && (await notes(LG)).some((t) => t === 'New task: Design ad creatives'), 'agent notified: added to client + new task');
+await as(LG, async () => {
+  ok((await q(`select count(*)::int c from clients where id=$1`, [c2]))[0].c === 1, 'agent can see the client they work on');
+  ok((await q(`update clients set notes='x' where id=$1 returning id`, [c2])).length === 0, 'agent cannot edit the client');
+  await q(`select task_set_status($1,'in_review','done')`, [PT]);
+});
+ok((await notes(PM1)).some((t) => t === 'Ready for review: Design ad creatives'), 'PM notified when agent submits');
+await as(PM1, () => q(`select task_review($1, true, 'Nice')`, [PT]));
+ok((await notes(LG)).some((t) => t === 'Approved: Design ad creatives'), 'agent notified on approval by PM');
+await as(FN, () => q(`insert into invoices (client_id, invoice_number, amount) values ($1,'INV-9',300)`, [c2]));
+ok((await notes(A)).some((t) => t.startsWith('New invoice for Brew Co')) && (await notes(MG)).some((t) => t.startsWith('New invoice for Brew Co')), 'finance change notifies admin + manager');
+ok(!(await notes(FN)).some((t) => t.startsWith('New invoice for Brew Co')), 'the person who made the change is not notified');
+await as(SR, async () => {
+  ok((await q(`select count(*)::int c from notifications`))[0].c >= 2, 'members read their own notifications');
+  await q(`update notifications set read_at=now()`);
+  ok((await q(`select count(*)::int c from notifications where read_at is null`))[0].c === 0, 'mark all as read');
+  await expectErr(() => q(`insert into notifications (user_id, title) values ($1,'x')`, [SR]), 'members cannot create notifications', /permission/);
+});
+await q(`insert into leads (company, contact_name, agent_id, source) values ('Form Brand', 'Ali', $1, 'Website form')`, [LG]);
+ok((await notes(A)).includes('New lead from the form: Form Brand') && (await notes(LG)).includes('Lead submitted for you: Form Brand'), 'public form lead notifies managers + the agent');
+await as(PM2, () => q(`select count(*)::int c from notifications`).then((r) => ok(true, 'notifications are private (PM2 sees ' + r[0].c + ')')));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1,7 +1,7 @@
 // Task detail drawer (admin + member) and the admin task form.
 import { supabase } from './supabase.js';
 import { state, roleName } from './state.js';
-import { q, rpc, TASK_FIELDS, loadTotals, loadMembers } from './data.js';
+import { q, rpc, TASK_FIELDS, loadTotals, loadMembers, loadDirectory, dirName } from './data.js';
 import {
   esc, icon, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy, loadingBlock,
   statusBadge, prioTag, roleChip, avatar, fullName, STATUS_LABEL, PRIORITY_LABEL,
@@ -15,6 +15,7 @@ const END_REASON = { pause: 'Paused', stop: 'Stopped', switch: 'Switched task', 
 export function openTaskDrawer(taskId) {
   const drawer = openDrawer({ title: 'Task', body: loadingBlock(5), onClose: () => window.removeEventListener('ehos:data-changed', onExternal) });
   let reloading = false;
+  let clientRow = null;
   const onExternal = () => { if (!reloading) load(); };
   window.addEventListener('ehos:data-changed', onExternal);
 
@@ -36,6 +37,7 @@ export function openTaskDrawer(taskId) {
         drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This task was deleted or is no longer assigned to you.</p>';
         return;
       }
+      clientRow = task.client_id ? await q(supabase.from('clients').select('id, name, project_manager').eq('id', task.client_id).maybeSingle()).catch(() => null) : null;
       render(task, comments, totals.get(task.id), entries, history, totals.fetchedAt);
     } catch (e) {
       drawer.querySelector('.drawer-body').innerHTML = `<div class="form-error">${esc(e.message)}</div>`;
@@ -44,6 +46,7 @@ export function openTaskDrawer(taskId) {
 
   function render(task, comments, tot, entries, history, fetchedAt) {
     const mine = task.assigned_to === state.profile.id;
+    const manage = state.isAdmin || Boolean(clientRow && clientRow.project_manager === state.profile.id);
     const myTotals = tot?.byUser?.[state.profile.id];
     const tState = timerStateFor(myTotals);
     const canTime = mine && ['todo', 'in_progress'].includes(task.status);
@@ -83,6 +86,7 @@ export function openTaskDrawer(taskId) {
       <dl class="kv">
         <dt>Assigned to</dt><dd>${task.assignee ? `<div class="who">${avatar(task.assignee, 'sm')}<span>${esc(fullName(task.assignee))}</span></div>` : '<span class="muted">Nobody yet</span>'}</dd>
         <dt>Role</dt><dd>${task.team_role ? esc(roleName(task.team_role)) : '<span class="muted">Any role</span>'}</dd>
+        ${clientRow ? `<dt>Client</dt><dd>${esc(clientRow.name)}</dd>` : ''}
         <dt>Due date</dt><dd>${task.due_date ? esc(fmtDate(task.due_date)) : '<span class="muted">No due date</span>'}</dd>
         ${task.start_date ? `<dt>Start date</dt><dd>${esc(fmtDate(task.start_date))}</dd>` : ''}
         <dt>Created</dt><dd>${esc(fmtDateTime(task.created_at))}</dd>
@@ -126,13 +130,13 @@ export function openTaskDrawer(taskId) {
 
     // footer actions
     let foot = '';
-    if (state.isAdmin) {
+    if (manage) {
       foot += `<button class="btn btn-ghost btn-danger" data-act="delete">${icon('trash', 14)}Delete</button><span style="flex:1"></span>`;
       foot += `<button class="btn" data-act="edit">${icon('edit', 14)}Edit</button>`;
       if (task.status === 'in_review') foot += `<button class="btn" data-act="changes">${icon('undo', 14)}Request changes</button><button class="btn btn-success" data-act="approve">${icon('check', 14)}Approve</button>`;
     }
     if (mine) {
-      if (state.isAdmin) foot += '<span style="flex-basis:100%;height:0"></span>';
+      if (manage) foot += '<span style="flex-basis:100%;height:0"></span>';
       if (task.status === 'todo') foot += `<button class="btn" data-act="to-progress">Mark in progress</button>`;
       if (task.status === 'in_progress') foot += `<button class="btn btn-ghost" data-act="to-todo">Move back to To do</button>`;
       if (['todo', 'in_progress'].includes(task.status)) foot += `<button class="btn btn-primary" data-act="submit">${icon('send', 14)}Submit for review</button>`;
@@ -200,7 +204,7 @@ export function openTaskDrawer(taskId) {
         await rpc('task_review', { p_task_id: task.id, p_approve: false, p_note: note });
         toast('Sent back with your notes');
       }
-      if (act === 'edit') { openTaskForm({ task, onSaved: () => { changed(); load(); } }); return; }
+      if (act === 'edit') { openTaskForm({ task, clientName: clientRow?.name || '', onSaved: () => { changed(); load(); } }); return; }
       if (act === 'delete') {
         const ok = await confirmDialog({ title: 'Delete this task?', text: `"${task.title}" and its comments will be removed. Tasks with tracked time can't be deleted.`, confirm: 'Delete task', danger: true });
         if (!ok) return;
@@ -218,13 +222,23 @@ export function openTaskDrawer(taskId) {
 
 // ---------------- Admin: create / edit task ----------------
 let membersCache = null;
-export async function openTaskForm({ task = null, presetMember = null, presetRole = null, onSaved } = {}) {
-  if (!membersCache || !task) membersCache = (await loadMembers()).filter((m) => ['active', 'invited'].includes(m.status));
-  const members = membersCache;
+export async function openTaskForm({ task = null, presetMember = null, presetRole = null, clientId = null, clientName = '', memberOptions = null, onSaved } = {}) {
+  clientId = clientId || task?.client_id || null;
+  let members = memberOptions;
+  if (!members) {
+    if (!state.isAdmin && clientId) {
+      const [team, dir] = await Promise.all([q(supabase.from('client_members').select('member_id, role_label').eq('client_id', clientId)), loadDirectory()]);
+      members = team.map((t) => ({ id: t.member_id, first_name: `${dirName(dir, t.member_id)} (${t.role_label})`, last_name: '', roles: [], status: 'active' }));
+    } else {
+      if (!membersCache || !task) membersCache = (await loadMembers()).filter((m) => ['active', 'invited'].includes(m.status));
+      members = membersCache;
+    }
+  }
   const t = task || { title: '', description: '', team_role: presetRole || '', assigned_to: presetMember || '', priority: 'medium', start_date: '', due_date: '', status: 'todo' };
 
   const m = openModal({
     title: task ? 'Edit task' : 'New task',
+    subtitle: clientName ? `For client ${esc(clientName)}` : '',
     wide: true,
     body: `
       <form id="task-form" class="form-grid" novalidate>
@@ -255,9 +269,9 @@ export async function openTaskForm({ task = null, presetMember = null, presetRol
   const fillMembers = () => {
     const role = roleSel.value;
     const current = memberSel.value || t.assigned_to || '';
-    const list = members.filter((x) => !role || x.roles.includes(role));
+    const list = members.filter((x) => !role || memberOptions || !x.roles.length || x.roles.includes(role));
     memberSel.innerHTML = `<option value="">Unassigned</option>${list.map((x) => `<option value="${x.id}" ${x.id === current ? 'selected' : ''}>${esc(fullName(x))}${x.status === 'invited' ? ' (invited)' : ''}</option>`).join('')}`;
-    m.querySelector('#tf-member-hint').textContent = role
+    m.querySelector('#tf-member-hint').textContent = clientId ? 'Agents working on this client.' : role
       ? (list.length ? `Showing members with the ${roleName(role)} role.` : `Nobody has the ${roleName(role)} role yet. Add it from the Team page.`)
       : '';
   };
@@ -279,6 +293,7 @@ export async function openTaskForm({ task = null, presetMember = null, presetRol
       due_date: m.querySelector('#tf-due').value || null,
     };
     if (task) payload.status = m.querySelector('#tf-status').value;
+    if (clientId) payload.client_id = clientId;
     if (!payload.title) { err.textContent = 'Give the task a title.'; err.classList.remove('hidden'); return; }
     if (payload.start_date && payload.due_date && payload.due_date < payload.start_date) {
       err.textContent = 'The due date is before the start date.'; err.classList.remove('hidden'); return;

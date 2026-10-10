@@ -9,6 +9,9 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 - Team roles (a member can hold several, each adds a sidebar tab): Sales Representative `sales_rep`, Lead Generation `lead_gen`, Cold Caller `cold_caller`, Finance `finance`, Manager `manager`, Project Manager `project_manager`.
 - **Manager role = admin-level access** (`is_manager()` in SQL, `state.isAdmin` in JS) except Settings and Permissions, which only the admin account (`state.isOwner`) can change.
 - Business modules: Leads → (Mark as won → `lead_mark_won`) → Clients (onboarding, PM, invoices, contracts/files in Storage bucket `client-files`) → Finance (revenue = paid invoices, `business_summary()`).
+- Leads pipeline: new → contacted → qualified → meeting → proposal → negotiation → won/lost. A won lead is converted with `lead_convert()` (sets `client_id`); "Converted to client" is a filter, not a stage. Lead form fields + options live in `public/js/lead-options.js`, shared with the public form `public/lead-form.html` (no login, posts to `POST /api/public/lead`, agents from `GET /api/public/form` = members with the Lead Generation role, or a typed name).
+- Client agents: `client_members` (designer, web dev…). Agents can view their clients; the client's project manager (or admin/manager) assigns them tasks with `tasks.client_id`.
+- Notifications: `notifications` table filled only by triggers (`tasks_notify`, `leads_notify`, `clients_notify`, `finance_notify`, `files_notify`, `client_members_notify`) via `notify()` / `notify_managers()` / `notify_role()`; never notify the actor. Bell UI in `public/js/notify.js`.
 - Module access per role lives in `role_permissions` (leads / clients / finance × view / edit / delete), edited on the Permissions page. SQL checks: `perm()`, `pm_perm()`, `can_client()`, `can_invoice()`. Project Manager access applies only to clients where `clients.project_manager` is them.
 - Not built yet on purpose: task file attachments (members paste Drive links in comments), timer corrections, custom SMTP. Build only when asked.
 
@@ -22,7 +25,7 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 ```bash
 npm install
 npm run dev      # http://localhost:3000 (needs .env, see .env.example)
-npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (98 checks)
+npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (121 checks)
 ```
 
 ## Where things live

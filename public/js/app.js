@@ -31,7 +31,7 @@ function memberNav() {
     { route: 'home', label: 'Dashboard', icon: 'home', page: 'member-home' },
     { route: 'my-tasks', label: 'My tasks', icon: 'tasks', page: 'my-tasks' },
     can('leads') && { route: 'leads', label: 'Leads', icon: 'target', page: 'leads' },
-    canAny('clients') && { route: 'clients', label: state.perms.clients?.view ? 'Clients' : 'My clients', icon: 'briefcase', page: 'clients' },
+    (canAny('clients') || state.agentOf?.length) && { route: 'clients', label: state.perms.clients?.view ? 'Clients' : 'My clients', icon: 'briefcase', page: 'clients' },
     can('finance') && { route: 'finance', label: 'Finance', icon: 'wallet', page: 'finance' },
     { route: 'my-time', label: 'My work time', icon: 'clock', page: 'tracking' },
     { route: 'my-activity', label: 'My activity', icon: 'activity', page: 'my-activity' },
@@ -47,11 +47,12 @@ async function boot() {
   if (!session) return location.replace('/login.html');
   state.user = session.user;
 
-  const [profile, roles, settings, permRows] = await Promise.all([
+  const [profile, roles, settings, permRows, agentOf] = await Promise.all([
     q(supabase.from('profiles').select('*, member_roles(role_key)').eq('id', session.user.id).maybeSingle()),
     q(supabase.from('team_roles').select('*').order('sort')),
     q(supabase.from('app_settings').select('*').eq('id', 1).maybeSingle()),
     q(supabase.from('role_permissions').select('*')).catch(() => []),
+    q(supabase.from('client_members').select('client_id').eq('member_id', session.user.id)).catch(() => []),
   ]);
   if (!profile) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
   if (['inactive', 'suspended'].includes(profile.status)) { await supabase.auth.signOut(); return location.replace('/login.html?msg=inactive'); }
@@ -63,6 +64,7 @@ async function boot() {
   state.isOwner = profile.role === 'admin';
   state.isAdmin = state.isOwner || state.myRoles.includes('manager');
   state.permRows = permRows || [];
+  state.agentOf = (agentOf || []).map((r) => r.client_id);
   computePerms();
   setTimezone(state.settings.timezone);
 
@@ -130,6 +132,7 @@ function renderShell() {
           <div class="page-title" id="page-title"></div>
           <div class="spacer"></div>
           <div id="timer-slot"></div>
+          <div id="bell-slot"></div>
         </header>
         <main class="content" id="content"></main>
       </div>
@@ -141,6 +144,7 @@ function renderShell() {
     if (shell.classList.contains('nav-open') && (e.target.closest('.nav a') || e.target === shell)) shell.classList.remove('nav-open');
   });
   document.getElementById('signout').onclick = signOut;
+  import('./notify.js').then((m) => m.mountBell(document.getElementById('bell-slot')));
   mountTimerPill(document.getElementById('timer-slot'), async (taskId) => {
     const { openTaskDrawer } = await import('./task-drawer.js');
     openTaskDrawer(taskId);

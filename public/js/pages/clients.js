@@ -3,7 +3,8 @@ import { supabase } from '../supabase.js';
 import { state, can, canAny, money } from '../state.js';
 import { q, loadDirectory, dirName } from '../data.js';
 import { esc, icon, emptyState, loadingBlock, on, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy } from '../ui.js';
-import { fmtDate, fmtDateOfIso, todayStr, daysBetween } from '../time.js';
+import { fmtDate, fmtDateOfIso, todayStr, daysBetween, dueLabel, dueState } from '../time.js';
+import { statusBadge, prioTag } from '../ui.js';
 
 export const CLIENT_STATUS = { onboarding: 'Onboarding', active: 'Active', paused: 'Paused', churned: 'Churned' };
 export const INVOICE_STATUS = { draft: 'Draft', sent: 'Unpaid', paid: 'Paid', cancelled: 'Cancelled' };
@@ -16,6 +17,8 @@ const isPM = (c) => c.project_manager === state.profile.id;
 const canEditClient = (c) => can('clients', 'edit') || (isPM(c) && state.pmPerms.clients?.edit);
 const canDeleteClient = (c) => can('clients', 'delete') || (isPM(c) && state.pmPerms.clients?.delete);
 const canInv = (c, a) => can('finance', a) || (isPM(c) && state.pmPerms.finance?.[a]);
+export const AGENT_ROLES = ['Designer', 'Web Developer', 'Social Media Manager', 'Ads Specialist', 'Video Editor', 'Content Writer', 'SEO Specialist', 'Other'];
+const canManageTeam = (c) => state.isAdmin || isPM(c);
 const canFiles = (c, a) => (a === 'view' ? true : a === 'edit' ? canEditClient(c) : canDeleteClient(c));
 
 export async function render({ el, params }) {
@@ -27,7 +30,7 @@ export async function render({ el, params }) {
 
   el.innerHTML = `
     <div class="page-head">
-      <div><h1>${onlyMine ? 'My clients' : 'Clients'}</h1><p>${onlyMine ? 'Clients assigned to you as project manager.' : 'Won deals with their onboarding, contracts, invoices and revenue.'}</p></div>
+      <div><h1>${onlyMine ? 'My clients' : 'Clients'}</h1><p>${onlyMine ? 'Clients you manage or work on.' : 'Won deals with their onboarding, contracts, invoices and revenue.'}</p></div>
       <div class="actions">${can('clients', 'edit') ? `<button class="btn btn-primary" id="new">${icon('plus', 15)}New client</button>` : ''}</div>
     </div>
     <div class="toolbar"><div class="seg" role="group" aria-label="Status" id="status"></div></div>
@@ -199,15 +202,18 @@ export function openClientDrawer(id, tab = 'overview') {
     if (!drawer.isConnected) return;
     if (!c) { drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This client was deleted or isn\'t assigned to you.</p>'; return; }
     const showInv = canInv(c, 'view');
-    const [invoices, files] = await Promise.all([
+    const [invoices, files, team, ctasks] = await Promise.all([
       showInv ? q(supabase.from('invoices').select('*').eq('client_id', id).order('issue_date', { ascending: false })) : Promise.resolve([]),
       q(supabase.from('client_files').select('*').eq('client_id', id).order('created_at', { ascending: false })),
+      q(supabase.from('client_members').select('*').eq('client_id', id).order('created_at')),
+      q(supabase.from('tasks').select('id, title, status, priority, due_date, assigned_to').eq('client_id', id).order('created_at', { ascending: false })),
     ]);
     if (!drawer.isConnected) return;
     drawer.querySelector('.drawer-head h2').textContent = c.name;
     const paid = invoices.filter((i) => i.status === 'paid').reduce((a, i) => a + Number(i.amount), 0);
     const due = invoices.filter((i) => i.status === 'sent').reduce((a, i) => a + Number(i.amount), 0);
-    const tabs = [['overview', 'Overview'], showInv && ['invoices', `Invoices${invoices.length ? ` (${invoices.length})` : ''}`], ['files', `Contracts & files${files.length ? ` (${files.length})` : ''}`]].filter(Boolean);
+    const tabs = [['overview', 'Overview'], ['team', `Team${team.length ? ` (${team.length})` : ''}`], ['tasks', `Tasks${ctasks.length ? ` (${ctasks.length})` : ''}`],
+      showInv && ['invoices', `Invoices${invoices.length ? ` (${invoices.length})` : ''}`], ['files', `Files${files.length ? ` (${files.length})` : ''}`]].filter(Boolean);
     if (!tabs.some(([k]) => k === tab)) tab = 'overview';
 
     let content = '';
@@ -230,6 +236,36 @@ export function openClientDrawer(id, tab = 'overview') {
           <dt>Client since</dt><dd>${esc(fmtDateOfIso(c.created_at))}${c.lead_id ? ' (from a won lead)' : ''}</dd>
         </dl>
         <div><div class="section-title">Notes</div>${c.notes ? `<div class="desc">${esc(c.notes)}</div>` : '<p class="muted small">No notes.</p>'}</div>`;
+    } else if (tab === 'team') {
+      const taken = new Set(team.map((t) => t.member_id));
+      const options = dir.filter((d) => d.status === 'active' && !taken.has(d.id) && d.id !== c.project_manager);
+      content = `
+        <div class="note info">The project manager runs this client. Agents (designer, developer, social media manager…) work with them and get tasks for this client.</div>
+        <div><div class="section-title">Project manager</div>
+          <div class="list-item panel" style="padding:10px 14px">${c.project_manager ? `<span class="mini-av">${esc((dirName(dir, c.project_manager) || '?')[0])}</span><div class="grow"><div class="title">${esc(dirName(dir, c.project_manager))}</div></div>` : '<div class="grow muted">Not assigned yet</div>'}
+          ${can('clients', 'edit') ? '<button class="btn btn-sm" data-act="edit">Change</button>' : ''}</div></div>
+        <div><div class="section-title">Agents</div>
+          ${team.length ? `<div class="panel"><div class="list">${team.map((t) => `
+            <div class="list-item" style="padding:10px 14px"><span class="mini-av">${esc((dirName(dir, t.member_id) || '?')[0])}</span>
+              <div class="grow"><div class="title">${esc(dirName(dir, t.member_id) || 'Member')}</div><div class="meta">${esc(t.role_label)}</div></div>
+              ${canManageTeam(c) ? `<button class="btn btn-sm" data-assign="${t.member_id}">${icon('plus', 13)}Assign task</button><button class="btn btn-sm btn-ghost btn-icon btn-danger" data-remove="${t.member_id}" aria-label="Remove agent">${icon('x', 13)}</button>` : ''}
+            </div>`).join('')}</div></div>` : '<p class="muted small">No agents yet.</p>'}
+        </div>
+        ${canManageTeam(c) ? `<div class="panel"><div class="panel-body stack" style="gap:10px">
+          <div class="section-title" style="margin:0">Add an agent</div>
+          <div class="form-grid">
+            <div class="field"><label for="ag-member">Team member</label><select id="ag-member" class="select"><option value="">Choose a member</option>${options.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></div>
+            <div class="field"><label for="ag-role">Works as</label><select id="ag-role" class="select">${AGENT_ROLES.map((r) => `<option>${r}</option>`).join('')}</select>
+              <input id="ag-role-other" class="input hidden" style="margin-top:6px" maxlength="40" placeholder="Type the role"></div>
+          </div>
+          <div><button class="btn btn-primary btn-sm" data-add-agent>${icon('userPlus', 13)}Add agent</button></div></div></div>` : ''}`;
+    } else if (tab === 'tasks') {
+      content = `
+        <div class="section-title">Tasks for this client <span>${canManageTeam(c) ? `<button class="btn btn-sm btn-primary" data-assign="">${icon('plus', 13)}New task</button>` : ''}</span></div>
+        ${ctasks.length ? `<div class="panel"><div class="list">${ctasks.map((t) => `
+          <div class="list-item clickable" data-task="${t.id}"><div class="grow"><div class="title">${esc(t.title)}</div>
+            <div class="meta">${statusBadge(t.status)}${prioTag(t.priority)}<span>${esc(dirName(dir, t.assigned_to) || 'Unassigned')}</span>${t.due_date && t.status !== 'completed' ? `<span class="due ${dueState(t)}">${esc(dueLabel(t.due_date))}</span>` : ''}</div></div></div>`).join('')}</div></div>`
+          : emptyState('No tasks yet', canManageTeam(c) ? 'Add agents on the Team tab, then assign them work here.' : '')}`;
     } else if (tab === 'invoices') {
       content = `
         <div class="section-title">Invoices <span class="row">${canInv(c, 'edit') ? `<button class="btn btn-sm btn-primary" data-new-inv>${icon('plus', 13)}New invoice</button>` : ''}</span></div>
@@ -270,6 +306,28 @@ export function openClientDrawer(id, tab = 'overview') {
     const body = drawer.querySelector('.drawer-body');
     body.querySelectorAll('[data-tab]').forEach((b) => b.onclick = () => { tab = b.dataset.tab; load(); });
     body.querySelector('[data-new-inv]')?.addEventListener('click', () => openInvoiceForm({ clientId: id }));
+    body.querySelector('[data-act="edit"]')?.addEventListener('click', () => openClientForm(c));
+    const agRole = body.querySelector('#ag-role');
+    agRole?.addEventListener('change', () => body.querySelector('#ag-role-other').classList.toggle('hidden', agRole.value !== 'Other'));
+    body.querySelector('[data-add-agent]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const member = body.querySelector('#ag-member').value;
+      const label = agRole.value === 'Other' ? body.querySelector('#ag-role-other').value.trim() : agRole.value;
+      if (!member) return toast('Choose a team member', 'error');
+      if (!label) return toast('Type the role', 'error');
+      try { await q(supabase.from('client_members').insert({ client_id: id, member_id: member, role_label: label })); toast('Agent added. They were notified.'); changed(); }
+      catch (err) { toast(err.message, 'error'); }
+    }));
+    body.querySelectorAll('[data-remove]').forEach((b) => b.onclick = async () => {
+      if (!await confirmDialog({ title: `Remove ${dirName(dir, b.dataset.remove)} from ${c.name}?`, text: 'Their existing tasks stay.', confirm: 'Remove agent', danger: true })) return;
+      try { await q(supabase.from('client_members').delete().eq('client_id', id).eq('member_id', b.dataset.remove)); toast('Agent removed'); changed(); } catch (err) { toast(err.message, 'error'); }
+    });
+    body.querySelectorAll('[data-assign]').forEach((b) => b.onclick = async () => {
+      const { openTaskForm } = await import('../task-drawer.js');
+      const opts = team.map((t) => ({ id: t.member_id, first_name: `${dirName(dir, t.member_id)} (${t.role_label})`, last_name: '', roles: [], status: 'active' }));
+      if (state.isAdmin && c.project_manager && !team.some((t) => t.member_id === c.project_manager)) opts.unshift({ id: c.project_manager, first_name: `${dirName(dir, c.project_manager)} (project manager)`, last_name: '', roles: [], status: 'active' });
+      openTaskForm({ clientId: id, clientName: c.name, memberOptions: opts, presetMember: b.dataset.assign || null, onSaved: () => { tab = 'tasks'; changed(); } });
+    });
+    body.querySelectorAll('[data-task]').forEach((x) => x.onclick = async () => { const { openTaskDrawer } = await import('../task-drawer.js'); openTaskDrawer(Number(x.dataset.task)); });
     body.querySelectorAll('[data-edit-inv]').forEach((b) => b.onclick = () => openInvoiceForm({ clientId: id, invoice: invoices.find((i) => i.id === Number(b.dataset.editInv)) }));
     body.querySelectorAll('[data-paid]').forEach((b) => b.onclick = () => busy(b, async () => {
       try { await q(supabase.from('invoices').update({ status: 'paid' }).eq('id', Number(b.dataset.paid))); toast('Marked as paid'); changed(); } catch (e) { toast(e.message, 'error'); }

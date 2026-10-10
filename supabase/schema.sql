@@ -1448,4 +1448,360 @@ do $$ begin
   end if;
 end $$;
 
+
+-- =====================================================================
+--  PART 3 — Richer leads, convert to client, client agents, notifications
+-- =====================================================================
+
+-- ---------- Leads: more fields + pipeline stages ----------
+alter table public.leads add column if not exists service        text;
+alter table public.leads add column if not exists budget         numeric(12, 2);
+alter table public.leads add column if not exists currency       text not null default 'USD';
+alter table public.leads add column if not exists priority       text not null default 'medium';
+alter table public.leads add column if not exists next_follow_up date;
+alter table public.leads add column if not exists agent_id       uuid references public.profiles(id);
+alter table public.leads add column if not exists agent_name     text;
+alter table public.leads add column if not exists converted_at   timestamptz;
+alter table public.leads drop constraint if exists leads_status_check;
+alter table public.leads add constraint leads_status_check
+  check (status in ('new', 'contacted', 'qualified', 'meeting', 'proposal', 'negotiation', 'won', 'lost'));
+alter table public.leads drop constraint if exists leads_priority_check;
+alter table public.leads add constraint leads_priority_check check (priority in ('low', 'medium', 'high', 'urgent'));
+create index if not exists leads_agent_idx on public.leads (agent_id);
+
+-- Tasks can belong to a client (so its project manager can assign work to the client's agents)
+alter table public.tasks add column if not exists client_id bigint references public.clients(id) on delete set null;
+create index if not exists tasks_client_idx on public.tasks (client_id);
+
+-- ---------- Client agents: people working on a client (designer, web dev, …) ----------
+create table if not exists public.client_members (
+  client_id   bigint not null references public.clients(id) on delete cascade,
+  member_id   uuid not null references public.profiles(id) on delete cascade,
+  role_label  text not null default 'Agent',
+  added_by    uuid references public.profiles(id),
+  created_at  timestamptz not null default now(),
+  primary key (client_id, member_id)
+);
+create index if not exists client_members_member_idx on public.client_members (member_id);
+
+-- ---------- Notifications ----------
+create table if not exists public.notifications (
+  id          bigint generated always as identity primary key,
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  kind        text not null default 'info',
+  title       text not null,
+  body        text not null default '',
+  link        text,
+  read_at     timestamptz,
+  created_at  timestamptz not null default now()
+);
+create index if not exists notifications_user_idx on public.notifications (user_id, created_at desc);
+create index if not exists notifications_unread_idx on public.notifications (user_id) where read_at is null;
+
+-- ---------- Helpers ----------
+create or replace function public.is_client_pm(p_client bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from clients c where c.id = p_client and c.project_manager = auth.uid()) and pm_perm('clients', 'view');
+$$;
+
+create or replace function public.is_client_agent(p_client bigint, p_member uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from client_members where client_id = p_client and member_id = p_member);
+$$;
+
+-- Clients: workspace permission, the assigned project manager, or (view only) an agent on the client
+create or replace function public.can_client(p_client bigint, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from clients c where c.id = p_client
+                   and (perm('clients', p_action)
+                        or (c.project_manager = auth.uid() and pm_perm('clients', p_action))
+                        or (p_action = 'view' and exists (select 1 from client_members m where m.client_id = c.id and m.member_id = auth.uid()))));
+$$;
+
+create or replace function public.can_see_task(p_task bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from tasks t where t.id = p_task
+                   and (t.assigned_to = auth.uid() or is_manager() or (t.client_id is not null and is_client_pm(t.client_id))));
+$$;
+
+-- Send a notification (never to the person who caused it, never to inactive accounts)
+create or replace function public.notify(p_user uuid, p_kind text, p_title text, p_body text default '', p_link text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if p_user is null or p_user = auth.uid() then return; end if;
+  if not exists (select 1 from profiles where id = p_user and status = 'active') then return; end if;
+  insert into notifications (user_id, kind, title, body, link) values (p_user, p_kind, left(p_title, 200), left(coalesce(p_body, ''), 500), p_link);
+end $$;
+
+create or replace function public.notify_managers(p_kind text, p_title text, p_body text default '', p_link text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  for r in select p.id from profiles p where p.status = 'active'
+             and (p.role = 'admin' or exists (select 1 from member_roles m where m.member_id = p.id and m.role_key = 'manager')) loop
+    perform notify(r.id, p_kind, p_title, p_body, p_link);
+  end loop;
+end $$;
+
+create or replace function public.notify_role(p_role text, p_kind text, p_title text, p_body text default '', p_link text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  for r in select m.member_id as id from member_roles m join profiles p on p.id = m.member_id
+            where m.role_key = p_role and p.status = 'active' loop
+    perform notify(r.id, p_kind, p_title, p_body, p_link);
+  end loop;
+end $$;
+
+-- ---------- Convert a won lead into a client ----------
+create or replace function public.lead_convert(p_lead bigint) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); l leads%rowtype; v_client bigint; v_cur text;
+begin
+  if not perm('leads', 'edit') then raise exception 'You don''t have permission to convert leads'; end if;
+  select * into l from leads where id = p_lead for update;
+  if not found then raise exception 'Lead not found'; end if;
+  if l.status <> 'won' then raise exception 'Mark the lead as won before converting it'; end if;
+  if l.client_id is not null then return l.client_id; end if;
+  select currency into v_cur from app_settings where id = 1;
+  insert into clients (name, contact_name, email, phone, website, country, services, notes, lead_id, monthly_retainer, created_by)
+  values (coalesce(nullif(l.company, ''), l.contact_name), l.contact_name, l.email, l.phone, l.website, l.country, l.service, l.notes, l.id,
+          case when upper(l.currency) = upper(v_cur) then l.budget end, v_uid)
+  returning id into v_client;
+  update leads set client_id = v_client, converted_at = now() where id = p_lead;
+  perform log_event('lead_converted', 'lead', p_lead::text, 'Converted "' || l.company || '" to a client', jsonb_build_object('client_id', v_client));
+  perform notify_managers('client', 'New client: ' || l.company, member_name(v_uid) || ' converted a won lead. Assign a project manager.', '#/clients?open=' || v_client);
+  return v_client;
+end $$;
+
+-- Kept for older screens: won + convert in one step
+create or replace function public.lead_mark_won(p_lead bigint) returns bigint
+language plpgsql security definer set search_path = public as $$
+begin
+  if not perm('leads', 'edit') then raise exception 'You don''t have permission to update leads'; end if;
+  update leads set status = 'won' where id = p_lead and status <> 'won';
+  return lead_convert(p_lead);
+end $$;
+
+-- Task review: the client's project manager can review tasks on their client too
+create or replace function public.task_review(p_task_id bigint, p_approve boolean, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); t tasks%rowtype; v_note text := nullif(trim(coalesce(p_note, '')), '');
+begin
+  select * into t from tasks where id = p_task_id for update;
+  if not found then raise exception 'Task not found'; end if;
+  if not (is_manager() or (t.client_id is not null and is_client_pm(t.client_id))) then
+    raise exception 'Only the admin, a manager or the client''s project manager can review this task';
+  end if;
+  if t.status <> 'in_review' then raise exception 'This task is not waiting for review'; end if;
+  if not p_approve and v_note is null then raise exception 'Add a note so the member knows what to change'; end if;
+  update tasks set status = case when p_approve then 'completed' else 'in_progress' end, review_note = v_note where id = p_task_id;
+  if v_note is not null then
+    insert into task_comments (task_id, author_id, body)
+    values (p_task_id, v_uid, case when p_approve then 'Approved: ' else 'Changes requested: ' end || v_note);
+  end if;
+end $$;
+
+-- ---------- Notification triggers ----------
+create or replace function public.tasks_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_link text := '#/my-tasks'; v_pm uuid;
+begin
+  if new.client_id is not null then select project_manager into v_pm from clients where id = new.client_id; end if;
+  if tg_op = 'INSERT' then
+    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_name(auth.uid()), 'the admin'), v_link);
+    return new;
+  end if;
+  if new.assigned_to is distinct from old.assigned_to then
+    perform notify(new.assigned_to, 'task', 'New task: ' || new.title, 'Assigned by ' || coalesce(member_name(auth.uid()), 'the admin'), v_link);
+  end if;
+  if new.status is distinct from old.status then
+    if new.status = 'in_review' then
+      perform notify_managers('review', 'Ready for review: ' || new.title, 'Submitted by ' || coalesce(member_name(new.assigned_to), 'a member'), '#/tasks?status=in_review');
+      perform notify(v_pm, 'review', 'Ready for review: ' || new.title, 'Submitted by ' || coalesce(member_name(new.assigned_to), 'a member'), '#/clients?open=' || new.client_id);
+    elsif old.status = 'in_review' and new.status = 'completed' then
+      perform notify(new.assigned_to, 'task', 'Approved: ' || new.title, coalesce(new.review_note, ''), v_link);
+    elsif old.status = 'in_review' then
+      perform notify(new.assigned_to, 'task', 'Changes requested: ' || new.title, coalesce(new.review_note, ''), v_link);
+    elsif new.assigned_to is not distinct from old.assigned_to then
+      perform notify(new.assigned_to, 'task', 'Task moved to ' || replace(new.status, '_', ' ') || ': ' || new.title, '', v_link);
+    end if;
+  elsif new.assigned_to is not distinct from old.assigned_to
+        and (new.title, new.description, new.priority, new.due_date) is distinct from (old.title, old.description, old.priority, old.due_date) then
+    perform notify(new.assigned_to, 'task', 'Task updated: ' || new.title, 'Check the latest details', v_link);
+  end if;
+  return new;
+end $$;
+drop trigger if exists tasks_notify on public.tasks;
+create trigger tasks_notify after insert or update on public.tasks for each row execute function public.tasks_notify();
+
+create or replace function public.leads_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_link text := '#/leads?open=' || new.id; v_who text := coalesce(member_name(auth.uid()), coalesce('Lead form (' || new.agent_name || ')', 'Lead form'));
+begin
+  if tg_op = 'INSERT' then
+    perform notify(new.assigned_to, 'lead', 'New lead assigned: ' || new.company, 'Added by ' || v_who, v_link);
+    if auth.uid() is null then
+      perform notify_managers('lead', 'New lead from the form: ' || new.company, coalesce('Agent: ' || coalesce(member_name(new.agent_id), new.agent_name), ''), v_link);
+      perform notify(new.agent_id, 'lead', 'Lead submitted for you: ' || new.company, 'Came in through the lead form', v_link);
+    end if;
+    return new;
+  end if;
+  if new.assigned_to is distinct from old.assigned_to then
+    perform notify(new.assigned_to, 'lead', 'Lead assigned to you: ' || new.company, 'By ' || v_who, v_link);
+  end if;
+  if new.status is distinct from old.status then
+    if new.status in ('won', 'lost') then
+      perform notify_managers('lead', 'Lead ' || new.status || ': ' || new.company, 'By ' || v_who || case when new.status = 'won' then '. Convert it to a client.' else '' end, v_link);
+    end if;
+    perform notify(new.assigned_to, 'lead', new.company || ' moved to ' || new.status, 'By ' || v_who, v_link);
+    perform notify(coalesce(new.agent_id, new.created_by), 'lead', 'Your lead ' || new.company || ' is ' || new.status, 'By ' || v_who, v_link);
+  end if;
+  return new;
+end $$;
+drop trigger if exists leads_notify on public.leads;
+create trigger leads_notify after insert or update on public.leads for each row execute function public.leads_notify();
+
+create or replace function public.clients_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_link text := '#/clients?open=' || new.id; v_who text := coalesce(member_name(auth.uid()), 'System');
+begin
+  if tg_op = 'INSERT' then
+    perform notify(new.project_manager, 'client', 'Client assigned to you: ' || new.name, 'By ' || v_who, v_link);
+    return new;
+  end if;
+  if new.project_manager is distinct from old.project_manager then
+    perform notify(new.project_manager, 'client', 'Client assigned to you: ' || new.name, 'By ' || v_who, v_link);
+  elsif (to_jsonb(new) - 'updated_at') is distinct from (to_jsonb(old) - 'updated_at') then
+    perform notify(new.project_manager, 'client', 'Client updated: ' || new.name, 'By ' || v_who, v_link);
+    if new.project_manager = auth.uid() then
+      perform notify_managers('client', 'Client updated: ' || new.name, 'By ' || v_who || ' (project manager)', v_link);
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists clients_notify on public.clients;
+create trigger clients_notify after insert or update on public.clients for each row execute function public.clients_notify();
+
+create or replace function public.client_members_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_name text;
+begin
+  select name into v_name from clients where id = coalesce(new.client_id, old.client_id);
+  if tg_op = 'INSERT' then
+    new.added_by := coalesce(auth.uid(), new.added_by);
+    perform notify(new.member_id, 'client', 'You were added to ' || v_name, 'As ' || new.role_label || ', by ' || coalesce(member_name(auth.uid()), 'the admin'), '#/clients?open=' || new.client_id);
+    perform log_event('client_agent_added', 'client', new.client_id::text, 'Added ' || member_name(new.member_id) || ' to "' || v_name || '" as ' || new.role_label, '{}'::jsonb, new.member_id);
+    return new;
+  end if;
+  perform log_event('client_agent_removed', 'client', old.client_id::text, 'Removed ' || member_name(old.member_id) || ' from "' || v_name || '"', '{}'::jsonb, old.member_id);
+  return old;
+end $$;
+drop trigger if exists client_members_before on public.client_members;
+create trigger client_members_before before insert on public.client_members for each row execute function public.client_members_notify();
+drop trigger if exists client_members_after_delete on public.client_members;
+create trigger client_members_after_delete after delete on public.client_members for each row execute function public.client_members_notify();
+
+-- Finance changes → admin, managers and the Finance team
+create or replace function public.finance_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_client text; v_title text; v_who text := coalesce(member_name(auth.uid()), 'System'); v_cid bigint := coalesce(new.client_id, old.client_id);
+begin
+  select name into v_client from clients where id = v_cid;
+  v_title := case
+    when tg_op = 'INSERT' then 'New invoice for ' || v_client || ': ' || new.amount
+    when tg_op = 'DELETE' then 'Invoice deleted for ' || v_client
+    when new.status = 'paid' and old.status <> 'paid' then 'Invoice paid by ' || v_client || ': ' || new.amount
+    else 'Invoice updated for ' || v_client end;
+  perform notify_managers('finance', v_title, 'By ' || v_who, '#/finance');
+  perform notify_role('finance', 'finance', v_title, 'By ' || v_who, '#/finance');
+  return coalesce(new, old);
+end $$;
+drop trigger if exists invoices_notify on public.invoices;
+create trigger invoices_notify after insert or update or delete on public.invoices for each row execute function public.finance_notify();
+
+-- Contracts / documents on a client → its project manager
+create or replace function public.files_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare c clients%rowtype;
+begin
+  select * into c from clients where id = coalesce(new.client_id, old.client_id);
+  perform notify(c.project_manager, 'client',
+    case when tg_op = 'INSERT' then 'New ' || new.kind || ' on ' || c.name else 'File removed from ' || c.name end,
+    coalesce(new.name, old.name), '#/clients?open=' || c.id);
+  return coalesce(new, old);
+end $$;
+drop trigger if exists files_notify on public.client_files;
+create trigger files_notify after insert or delete on public.client_files for each row execute function public.files_notify();
+
+-- ---------- RLS for part 3 ----------
+alter table public.client_members enable row level security;
+alter table public.notifications  enable row level security;
+
+drop policy if exists client_members_read on public.client_members;
+create policy client_members_read on public.client_members for select to authenticated
+  using (member_id = (select auth.uid()) or public.can_client(client_id, 'view'));
+drop policy if exists client_members_insert on public.client_members;
+create policy client_members_insert on public.client_members for insert to authenticated
+  with check ((select public.is_manager()) or public.is_client_pm(client_id));
+drop policy if exists client_members_delete on public.client_members;
+create policy client_members_delete on public.client_members for delete to authenticated
+  using ((select public.is_manager()) or public.is_client_pm(client_id));
+
+drop policy if exists notifications_read on public.notifications;
+create policy notifications_read on public.notifications for select to authenticated using (user_id = (select auth.uid()));
+drop policy if exists notifications_update on public.notifications;
+create policy notifications_update on public.notifications for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+drop policy if exists notifications_delete on public.notifications;
+create policy notifications_delete on public.notifications for delete to authenticated using (user_id = (select auth.uid()));
+
+-- Clients: agents can see the clients they work on
+drop policy if exists clients_read on public.clients;
+create policy clients_read on public.clients for select to authenticated
+  using ((select public.perm('clients', 'view'))
+         or (project_manager = (select auth.uid()) and (select public.pm_perm('clients', 'view')))
+         or public.is_client_agent(id, (select auth.uid())));
+
+-- Tasks: a client's project manager can create and manage tasks for that client's agents
+drop policy if exists tasks_read on public.tasks;
+create policy tasks_read on public.tasks for select to authenticated
+  using (assigned_to = (select auth.uid()) or (select public.is_manager()) or (client_id is not null and public.is_client_pm(client_id)));
+drop policy if exists tasks_admin_insert on public.tasks;
+create policy tasks_admin_insert on public.tasks for insert to authenticated
+  with check ((select public.is_manager())
+              or (client_id is not null and public.is_client_pm(client_id)
+                  and (assigned_to is null or assigned_to = (select auth.uid()) or public.is_client_agent(client_id, assigned_to))));
+drop policy if exists tasks_admin_update on public.tasks;
+create policy tasks_admin_update on public.tasks for update to authenticated
+  using ((select public.is_manager()) or (client_id is not null and public.is_client_pm(client_id)))
+  with check ((select public.is_manager())
+              or (client_id is not null and public.is_client_pm(client_id)
+                  and (assigned_to is null or assigned_to = (select auth.uid()) or public.is_client_agent(client_id, assigned_to))));
+drop policy if exists tasks_admin_delete on public.tasks;
+create policy tasks_admin_delete on public.tasks for delete to authenticated
+  using ((select public.is_manager()) or (client_id is not null and public.is_client_pm(client_id) and created_by = (select auth.uid())));
+
+drop policy if exists comments_read on public.task_comments;
+create policy comments_read on public.task_comments for select to authenticated using (public.can_see_task(task_id));
+drop policy if exists comments_insert on public.task_comments;
+create policy comments_insert on public.task_comments for insert to authenticated
+  with check (author_id = (select auth.uid()) and public.can_see_task(task_id));
+drop policy if exists time_read on public.task_time_entries;
+create policy time_read on public.task_time_entries for select to authenticated
+  using (user_id = (select auth.uid()) or (select public.is_manager()) or public.can_see_task(task_id));
+
+revoke all on public.client_members, public.notifications from anon, authenticated;
+grant select, insert, delete on public.client_members to authenticated;
+grant select, delete on public.notifications to authenticated;
+grant update (read_at) on public.notifications to authenticated;
+grant all on public.client_members, public.notifications to service_role;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.notify(uuid, text, text, text, text), public.notify_managers(text, text, text, text),
+  public.notify_role(text, text, text, text, text), public.tasks_notify(), public.leads_notify(), public.clients_notify(),
+  public.client_members_notify(), public.finance_notify(), public.files_notify() from authenticated;
+grant execute on function public.is_client_pm(bigint), public.is_client_agent(bigint, uuid), public.can_see_task(bigint),
+  public.lead_convert(bigint), public.lead_mark_won(bigint), public.task_review(bigint, boolean, text) to authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).

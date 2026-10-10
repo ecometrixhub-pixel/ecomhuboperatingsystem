@@ -1,15 +1,25 @@
-// Leads: add, import, work the pipeline, mark won → client
+// Leads pipeline: add, import, share the public form, work stages, won → convert to client
 import { supabase } from '../supabase.js';
-import { state, can, money } from '../state.js';
+import { state, can } from '../state.js';
 import { q, rpc, loadDirectory, dirName } from '../data.js';
-import { esc, icon, emptyState, loadingBlock, on, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy } from '../ui.js';
-import { fmtDateOfIso, fmtRelative, todayStr, localDate, startOfWeek } from '../time.js';
+import { esc, icon, emptyState, loadingBlock, on, openDrawer, closeDrawer, openModal, confirmDialog, toast, busy, copyText } from '../ui.js';
+import { fmtDate, fmtDateOfIso, fmtRelative, todayStr, localDate, startOfWeek } from '../time.js';
+import { STAGES, PRIORITIES, leadFormHTML, bindLeadForm, readLeadForm, fmtBudget } from '../lead-options.js';
 
-export const LEAD_STATUS = { new: 'New', contacted: 'Contacted', qualified: 'Qualified', proposal: 'Proposal sent', won: 'Won', lost: 'Lost' };
-export const LEAD_SOURCES = ['Instagram', 'Facebook', 'LinkedIn', 'Google Maps', 'Shopify store list', 'Website form', 'Cold call', 'Email outreach', 'Referral', 'Other'];
-const OPEN = ['new', 'contacted', 'qualified', 'proposal'];
+export const LEAD_STATUS = STAGES;
+const OPEN = ['new', 'contacted', 'qualified', 'meeting', 'proposal', 'negotiation'];
 const changed = () => window.dispatchEvent(new CustomEvent('ehos:data-changed'));
-export const leadBadge = (s) => `<span class="badge ${esc(s)}">${esc(LEAD_STATUS[s] || s)}</span>`;
+export const leadBadge = (s) => `<span class="badge ${esc(s)}">${esc(STAGES[s] || s)}</span>`;
+const initial = (name) => esc((name || '?').trim()[0]?.toUpperCase() || '?');
+
+function waLink(phone, country) {
+  let d = String(phone || '').replace(/\D/g, '');
+  if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2);
+  else if (d.startsWith('0') && (!country || country === 'Pakistan')) d = '92' + d.slice(1);
+  return `https://wa.me/${d}`;
+}
+export function agentLabel(l, dir) { return dirName(dir, l.agent_id) || l.agent_name || dirName(dir, l.created_by) || ''; }
 
 export async function render({ el, params }) {
   let leads = []; let dir = [];
@@ -20,45 +30,67 @@ export async function render({ el, params }) {
 
   el.innerHTML = `
     <div class="page-head">
-      <div><h1>Leads</h1><p>Every prospect from first contact to a won client.</p></div>
-      <div class="actions">${canEdit ? `<button class="btn" id="import">${icon('upload', 15)}Import CSV</button><button class="btn btn-primary" id="new">${icon('plus', 15)}New lead</button>` : ''}</div>
+      <div><h1>Leads</h1><p>Every prospect from first contact to a converted client.</p></div>
+      <div class="actions">
+        <button class="btn" id="share">${icon('share', 15)}Share lead form</button>
+        ${canEdit ? `<button class="btn" id="import">${icon('upload', 15)}Import CSV</button><button class="btn btn-primary" id="new">${icon('plus', 15)}New lead</button>` : ''}
+      </div>
     </div>
-    <div class="toolbar"><div class="seg" role="group" aria-label="Status" id="status"></div></div>
+    <div class="toolbar"><div class="seg" role="group" aria-label="Stage" id="status"></div></div>
     <div class="toolbar">
-      <div class="search grow">${icon('search', 15)}<input class="input" id="q" placeholder="Search company, contact, email" aria-label="Search leads"></div>
+      <div class="search grow">${icon('search', 15)}<input class="input" id="q" placeholder="Search name, company, email, phone" aria-label="Search leads"></div>
       <select class="select" id="scope" style="width:auto" aria-label="Whose leads">
-        <option value="all">All leads</option><option value="mine">Added by me</option><option value="assigned">Assigned to me</option>
+        <option value="all">All leads</option><option value="mine">My leads (agent / added by me)</option><option value="assigned">Assigned to me</option>
       </select>
     </div>
     <section class="panel"><div class="table-wrap" id="table">${loadingBlock(5)}</div></section>`;
   const table = el.querySelector('#table');
   el.querySelector('#scope').value = scope;
 
+  const groups = {
+    all: () => true,
+    open: (l) => OPEN.includes(l.status),
+    ...Object.fromEntries(Object.keys(STAGES).map((k) => [k, (l) => l.status === k && !(k === 'won' && l.client_id)])),
+    converted: (l) => Boolean(l.client_id),
+  };
+  const labels = [['all', 'All'], ['open', 'Open'], ...OPEN.map((k) => [k, STAGES[k]]), ['won', 'Won'], ['converted', 'Converted to client'], ['lost', 'Lost']];
+
   function draw() {
-    const counts = { all: leads.length };
-    Object.keys(LEAD_STATUS).forEach((k) => { counts[k] = leads.filter((l) => l.status === k).length; });
-    el.querySelector('#status').innerHTML = [['all', 'All'], ['open', 'Open'], ...Object.entries(LEAD_STATUS)].map(([k, v]) =>
-      `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${k === 'open' ? leads.filter((l) => OPEN.includes(l.status)).length : counts[k]}</span></button>`).join('');
+    el.querySelector('#status').innerHTML = labels.map(([k, v]) =>
+      `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${leads.filter(groups[k]).length}</span></button>`).join('');
     const s = search.toLowerCase();
-    const list = leads.filter((l) => (status === 'all' || (status === 'open' ? OPEN.includes(l.status) : l.status === status))
-      && (scope === 'all' || (scope === 'mine' ? l.created_by === state.profile.id : l.assigned_to === state.profile.id))
-      && (!s || `${l.company} ${l.contact_name || ''} ${l.email || ''} ${l.phone || ''}`.toLowerCase().includes(s)));
+    const me = state.profile.id;
+    const list = leads.filter((l) => groups[status](l)
+      && (scope === 'all' || (scope === 'mine' ? (l.created_by === me || l.agent_id === me) : l.assigned_to === me))
+      && (!s || `${l.contact_name || ''} ${l.company} ${l.email || ''} ${l.phone || ''}`.toLowerCase().includes(s)));
     if (!leads.length) {
-      table.innerHTML = emptyState('No leads yet', canEdit ? 'Add a lead or import a CSV. Sales reps see them here right away.' : 'Leads added by the team show up here.', canEdit ? '<button class="btn btn-primary" data-new>New lead</button>' : '');
+      table.innerHTML = emptyState('No leads yet', canEdit ? 'Add a lead, import a CSV, or share the lead form.' : 'Leads added by the team show up here.', canEdit ? '<button class="btn btn-primary" data-new>New lead</button>' : '');
       return;
     }
     if (!list.length) { table.innerHTML = emptyState('No leads match these filters'); return; }
-    table.innerHTML = `<table class="table">
-      <thead><tr><th>Company</th><th>Status</th><th>Source</th><th class="r">Est. value / mo</th><th>Sales rep</th><th>Added by</th><th>Added</th></tr></thead>
-      <tbody>${list.map((l) => `<tr class="clickable ${l.status === 'won' ? 'won' : ''}" data-id="${l.id}" tabindex="0">
-        <td><div style="font-weight:500">${esc(l.company)}</div><div class="small muted">${esc([l.contact_name, l.email || l.phone].filter(Boolean).join(', ') || '—')}</div></td>
-        <td>${leadBadge(l.status)}</td>
-        <td class="small">${esc(l.source || '—')}</td>
-        <td class="r money">${l.estimated_value ? money(l.estimated_value) : '<span class="muted">—</span>'}</td>
-        <td class="small">${esc(dirName(dir, l.assigned_to) || '—')}</td>
-        <td class="small muted">${esc(dirName(dir, l.created_by) || '—')}</td>
-        <td class="small muted">${esc(fmtRelative(l.created_at))}</td>
-      </tr>`).join('')}</tbody></table>`;
+    table.innerHTML = `<table class="table caps">
+      <thead><tr><th>Lead / company</th><th>Service</th><th>Pipeline status</th><th>Assigned to</th><th>Budget</th><th>Contact &amp; outreach</th><th>Next follow-up</th><th class="r">Actions</th></tr></thead>
+      <tbody>${list.map((l) => {
+        const rep = dirName(dir, l.assigned_to);
+        const wa = waLink(l.phone, l.country);
+        const fu = l.next_follow_up;
+        return `<tr class="${l.status === 'won' ? 'won' : ''}" data-id="${l.id}">
+        <td><div style="font-weight:600">${esc(l.contact_name || l.company)}</div><div class="small muted">${esc(l.contact_name ? l.company : (l.industry || ''))}</div>
+          ${l.client_id ? `<div class="client-chip">${icon('check', 11)}Client</div>` : ''}</td>
+        <td><div>${esc(l.service || l.industry || '—')}</div><span class="prio-pill ${esc(l.priority)}">${esc(PRIORITIES[l.priority] || l.priority)}</span></td>
+        <td>${canEdit && !l.client_id
+          ? `<select class="stage-select" data-stage="${esc(l.status)}" data-stage-for="${l.id}" aria-label="Pipeline status for ${esc(l.company)}">${Object.entries(STAGES).map(([k, v]) => `<option value="${k}" ${l.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`
+          : `<select class="stage-select" data-stage="${esc(l.status)}" disabled aria-label="Pipeline status"><option>${l.client_id ? 'Converted' : esc(STAGES[l.status])}</option></select>`}</td>
+        <td>${rep ? `<div class="row" style="gap:8px"><span class="mini-av">${initial(rep)}</span><span>${esc(rep)}</span></div>` : '<span class="muted small">Unassigned</span>'}</td>
+        <td>${l.budget !== null && l.budget !== undefined ? `<div style="font-weight:600" class="money">${esc(fmtBudget(l.budget, l.currency))}</div>` : '<div class="muted">—</div>'}<div class="small muted">${l.source ? `via ${esc(l.source)}` : ''}</div></td>
+        <td><div class="outreach">
+          ${l.phone ? `<a href="tel:${esc(l.phone)}" title="Call ${esc(l.phone)}" aria-label="Call">${icon('phone', 15)}</a>` : `<span title="No phone">${icon('phone', 15)}</span>`}
+          ${wa ? `<a class="wa" href="${wa}" target="_blank" rel="noopener" title="WhatsApp" aria-label="WhatsApp">${icon('chat', 15)}</a>` : `<span title="No phone">${icon('chat', 15)}</span>`}
+          ${l.email ? `<a href="mailto:${esc(l.email)}" title="Email ${esc(l.email)}" aria-label="Email">${icon('mail', 15)}</a>` : `<span title="No email">${icon('mail', 15)}</span>`}
+        </div></td>
+        <td class="small">${fu ? `<span class="due ${fu < todayStr() ? 'over' : fu === todayStr() ? 'soon' : ''}">${esc(fmtDate(fu))}</span>` : '<span class="muted">None</span>'}</td>
+        <td class="r"><button class="btn btn-sm btn-soft" data-open="${l.id}">Workspace ${icon('arrowRight', 13)}</button></td>
+      </tr>`; }).join('')}</tbody></table>`;
   }
 
   async function load() {
@@ -74,61 +106,68 @@ export async function render({ el, params }) {
   el.querySelector('#scope').addEventListener('change', (e) => { scope = e.target.value; draw(); });
   el.querySelector('#new')?.addEventListener('click', () => openLeadForm());
   el.querySelector('#import')?.addEventListener('click', () => openImport());
+  el.querySelector('#share').addEventListener('click', () => shareForm());
   const offs = [
     on(table, 'click', '[data-new]', () => openLeadForm()),
-    on(table, 'click', 'tr[data-id]', (e, tr) => openLeadDrawer(Number(tr.dataset.id))),
-    on(table, 'keydown', 'tr[data-id]', (e, tr) => { if (e.key === 'Enter') openLeadDrawer(Number(tr.dataset.id)); }),
+    on(table, 'click', '[data-open]', (e, b) => openLeadDrawer(Number(b.dataset.open))),
+    on(table, 'change', '[data-stage-for]', async (e, sel) => {
+      const id = Number(sel.dataset.stageFor); const next = sel.value;
+      sel.dataset.stage = next; sel.disabled = true;
+      try {
+        await q(supabase.from('leads').update({ status: next }).eq('id', id));
+        toast(next === 'won' ? 'Marked as won. Open Workspace to convert it to a client.' : `Moved to ${STAGES[next]}`);
+        changed();
+      } catch (err) { toast(err.message, 'error'); load(); }
+    }),
   ];
   const safe = () => load().catch((e) => { table.innerHTML = `<div class="form-error" style="margin:16px">${esc(e.message)}</div>`; });
   await safe();
   if (params.get('new') === '1' && canEdit) openLeadForm();
+  if (params.get('open')) openLeadDrawer(Number(params.get('open')));
   window.addEventListener('ehos:data-changed', safe);
   const poll = setInterval(safe, 60_000);
   return () => { offs.forEach((x) => x()); clearInterval(poll); window.removeEventListener('ehos:data-changed', safe); };
 }
 
-// ---------- Lead form ----------
+// ---------- Share the public form ----------
+export function shareForm() {
+  const link = `${location.origin}/lead-form.html`;
+  const msg = `Submit leads for Ecometrix Hub here: ${link}`;
+  const m = openModal({
+    title: 'Share the lead form', icon: 'share', subtitle: 'Anyone with the link can submit a lead. No login needed.',
+    body: `
+      <div class="link-box"><input class="input" readonly value="${esc(link)}" aria-label="Form link"><button class="btn" data-copy>${icon('copy', 14)}Copy</button></div>
+      <p class="small muted">The agent list shows everyone with the Lead Generation role, plus Other. New leads land in Leads and the admin and managers get a notification.</p>`,
+    foot: `<a class="btn" href="${esc(link)}" target="_blank" rel="noopener">Open form</a><a class="btn btn-primary" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">${icon('send', 14)}Share on WhatsApp</a>`,
+  });
+  m.querySelector('[data-copy]').onclick = async (e) => { if (await copyText(link)) { e.currentTarget.innerHTML = `${icon('check', 14)}Copied`; toast('Link copied'); } };
+}
+
+// ---------- Lead form (add / edit) ----------
 export async function openLeadForm(lead = null) {
   const dir = await loadDirectory();
-  const reps = dir.filter((d) => d.roles.includes('sales_rep') && d.status === 'active');
-  const l = lead || { company: '', contact_name: '', email: '', phone: '', website: '', country: '', industry: '', source: '', estimated_value: '', assigned_to: '', notes: '' };
+  const agents = dir.filter((d) => d.roles.includes('lead_gen') && d.status === 'active').map((d) => ({ id: d.id, name: d.name }));
+  const reps = dir.filter((d) => d.roles.includes('sales_rep') && d.status === 'active').map((d) => ({ id: d.id, name: d.name }));
+  const defaultAgent = !lead && agents.some((a) => a.id === state.profile.id) ? state.profile.id : '';
   const m = openModal({
-    title: lead ? 'Edit lead' : 'New lead',
+    title: lead ? 'Edit lead' : 'Add inbound or outreach lead',
+    subtitle: lead ? esc(lead.company) : 'Enroll a new prospect into the Ecometrix Hub pipeline',
+    icon: 'userPlus',
     wide: true,
-    body: `
-      <form id="lf" class="form-grid" novalidate>
-        <div class="field span-2"><label for="lf-company">Company / brand</label><input id="lf-company" class="input" maxlength="200" value="${esc(l.company)}" placeholder="e.g. GlowCo Skincare" required></div>
-        <div class="field"><label for="lf-contact">Contact person</label><input id="lf-contact" class="input" maxlength="120" value="${esc(l.contact_name || '')}"></div>
-        <div class="field"><label for="lf-email">Email</label><input id="lf-email" class="input" type="email" maxlength="160" value="${esc(l.email || '')}"></div>
-        <div class="field"><label for="lf-phone">Phone / WhatsApp</label><input id="lf-phone" class="input" maxlength="40" value="${esc(l.phone || '')}"></div>
-        <div class="field"><label for="lf-web">Website / store</label><input id="lf-web" class="input" maxlength="200" value="${esc(l.website || '')}" placeholder="https://"></div>
-        <div class="field"><label for="lf-country">Country</label><input id="lf-country" class="input" maxlength="60" value="${esc(l.country || '')}" placeholder="UK, USA…"></div>
-        <div class="field"><label for="lf-industry">Industry / niche</label><input id="lf-industry" class="input" maxlength="80" value="${esc(l.industry || '')}" placeholder="Skincare, apparel…"></div>
-        <div class="field"><label for="lf-source">Source</label><select id="lf-source" class="select"><option value="">Select</option>${LEAD_SOURCES.map((s) => `<option ${l.source === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
-        <div class="field"><label for="lf-value">Estimated value per month (${esc(state.settings.currency || 'USD')})</label><input id="lf-value" class="input" type="number" min="0" step="1" value="${esc(l.estimated_value ?? '')}"></div>
-        <div class="field span-2"><label for="lf-rep">Sales rep</label><select id="lf-rep" class="select"><option value="">Not assigned yet</option>${reps.map((r) => `<option value="${r.id}" ${l.assigned_to === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></div>
-        <div class="field span-2"><label for="lf-notes">Notes</label><textarea id="lf-notes" class="textarea" placeholder="What do they sell? Ad spend? How did you find them?">${esc(l.notes || '')}</textarea></div>
-        <div class="form-error hidden span-2" id="lf-err"></div>
-      </form>`,
-    foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${lead ? 'Save lead' : 'Add lead'}</button>`,
+    body: `<form id="lf" novalidate>${leadFormHTML({ lead: lead || {}, agents, reps, defaultAgent })}</form>`,
+    foot: `<button class="btn btn-ghost" data-cancel>Cancel</button><button class="btn btn-primary btn-lg" data-save>${lead ? 'Save lead' : 'Create lead'}</button>`,
   });
+  bindLeadForm(m);
   m.querySelector('[data-cancel]').onclick = () => m.close();
-  const err = m.querySelector('#lf-err');
-  const save = m.querySelector('[data-save]');
+  const err = m.querySelector('#lf-err'); const save = m.querySelector('[data-save]');
   const submit = () => busy(save, async () => {
     err.classList.add('hidden');
-    const v = (id) => m.querySelector(id).value.trim();
-    const payload = {
-      company: v('#lf-company'), contact_name: v('#lf-contact') || null, email: v('#lf-email') || null, phone: v('#lf-phone') || null,
-      website: v('#lf-web') || null, country: v('#lf-country') || null, industry: v('#lf-industry') || null, source: v('#lf-source') || null,
-      estimated_value: v('#lf-value') === '' ? null : Number(v('#lf-value')), assigned_to: v('#lf-rep') || null, notes: v('#lf-notes'),
-    };
-    if (!payload.company) { err.textContent = 'Enter the company or brand name.'; err.classList.remove('hidden'); return; }
-    if (payload.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email)) { err.textContent = 'That email doesn\'t look right.'; err.classList.remove('hidden'); return; }
+    const r = readLeadForm(m);
+    if (r.error) { err.textContent = r.error; err.classList.remove('hidden'); if (r.field) m.querySelector(r.field)?.focus(); return; }
     try {
-      if (lead) await q(supabase.from('leads').update(payload).eq('id', lead.id));
-      else await q(supabase.from('leads').insert(payload));
-      toast(lead ? 'Lead saved' : 'Lead added');
+      if (lead) await q(supabase.from('leads').update(r.payload).eq('id', lead.id));
+      else await q(supabase.from('leads').insert(r.payload));
+      toast(lead ? 'Lead saved' : 'Lead created');
       m.close(); changed();
     } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
   });
@@ -136,7 +175,7 @@ export async function openLeadForm(lead = null) {
   m.querySelector('#lf').addEventListener('submit', (e) => { e.preventDefault(); submit(); });
 }
 
-// ---------- Lead drawer ----------
+// ---------- Lead workspace (drawer) ----------
 export async function openLeadDrawer(id) {
   const drawer = openDrawer({ title: 'Lead', body: loadingBlock(4), onClose: () => window.removeEventListener('ehos:data-changed', reload) });
   const reload = () => load();
@@ -146,47 +185,65 @@ export async function openLeadDrawer(id) {
     if (!drawer.isConnected) return;
     if (!lead) { drawer.querySelector('.drawer-body').innerHTML = '<p class="muted">This lead was deleted.</p>'; return; }
     const canEdit = can('leads', 'edit');
-    drawer.querySelector('.drawer-head h2').textContent = lead.company;
+    const wa = waLink(lead.phone, lead.country);
+    drawer.querySelector('.drawer-head h2').innerHTML = `${esc(lead.contact_name || lead.company)}<div class="small muted" style="font-weight:400">${esc(lead.contact_name ? lead.company : '')}</div>`;
+    let banner = '';
+    if (lead.client_id) banner = `<div class="note ok"><b>Converted to client</b> ${esc(fmtRelative(lead.converted_at || lead.won_at))}. ${can('clients') ? `<button class="linkish" data-client="${lead.client_id}">Open client</button>` : ''}</div>`;
+    else if (lead.status === 'won') banner = `<div class="note ok row between wrap" style="gap:10px"><span><b>Won</b> ${esc(fmtRelative(lead.won_at))}. Convert it so the client can be onboarded.</span>${canEdit ? `<button class="btn btn-success btn-sm" data-act="convert">${icon('briefcase', 13)}Convert to client</button>` : ''}</div>`;
+    else if (lead.status === 'lost') banner = '<div class="note warn"><b>Lost.</b> Move it back to an open stage if the conversation restarts.</div>';
+
     drawer.querySelector('.drawer-body').innerHTML = `
-      <div class="row wrap">${leadBadge(lead.status)}${lead.source ? `<span class="chip">${esc(lead.source)}</span>` : ''}${lead.estimated_value ? `<span class="chip">${money(lead.estimated_value)} / mo</span>` : ''}</div>
-      ${lead.status === 'won' ? `<div class="note ok"><b>Won</b> ${esc(fmtRelative(lead.won_at))}. ${lead.client_id && can('clients') ? `<button class="linkish" data-client="${lead.client_id}">Open client</button>` : 'It is now a client.'}</div>` : ''}
-      ${canEdit && lead.status !== 'won' ? `<div><div class="section-title">Stage</div><div class="seg" role="group" aria-label="Lead stage">${Object.entries(LEAD_STATUS).filter(([k]) => k !== 'won').map(([k, v]) => `<button data-status="${k}" aria-pressed="${lead.status === k}">${v}</button>`).join('')}</div></div>` : ''}
+      ${banner}
+      <div class="row wrap">${leadBadge(lead.status)}<span class="prio-pill ${esc(lead.priority)}" style="margin:0">${esc(PRIORITIES[lead.priority])} priority</span>
+        ${lead.budget !== null && lead.budget !== undefined ? `<span class="chip">${esc(fmtBudget(lead.budget, lead.currency))}</span>` : ''}</div>
+      <div class="outreach">
+        ${lead.phone ? `<a href="tel:${esc(lead.phone)}" aria-label="Call">${icon('phone', 15)}</a>` : ''}
+        ${wa ? `<a class="wa" href="${wa}" target="_blank" rel="noopener" aria-label="WhatsApp">${icon('chat', 15)}</a>` : ''}
+        ${lead.email ? `<a href="mailto:${esc(lead.email)}" aria-label="Email">${icon('mail', 15)}</a>` : ''}
+      </div>
+      ${canEdit && !lead.client_id ? `<div><div class="section-title">Pipeline stage</div><div class="seg" role="group" aria-label="Lead stage">${OPEN.map((k) => `<button data-status="${k}" aria-pressed="${lead.status === k}">${STAGES[k]}</button>`).join('')}</div>
+        <div class="row" style="margin-top:10px">${lead.status !== 'won' ? `<button class="btn btn-sm btn-success" data-status="won">${icon('trophy', 13)}Mark as won</button>` : ''}${lead.status !== 'lost' ? `<button class="btn btn-sm btn-danger" data-status="lost">${icon('x', 13)}Mark as lost</button>` : ''}</div></div>` : ''}
       <dl class="kv">
-        <dt>Contact</dt><dd>${esc(lead.contact_name || '—')}</dd>
+        <dt>Company</dt><dd>${esc(lead.company)}</dd>
         <dt>Email</dt><dd>${lead.email ? `<a href="mailto:${esc(lead.email)}">${esc(lead.email)}</a>` : '—'}</dd>
-        <dt>Phone</dt><dd>${lead.phone ? `<a href="tel:${esc(lead.phone)}">${esc(lead.phone)}</a>` : '—'}</dd>
-        <dt>Website</dt><dd>${lead.website ? `<a href="${esc(/^https?:/.test(lead.website) ? lead.website : 'https://' + lead.website)}" target="_blank" rel="noopener">${esc(lead.website)}</a>` : '—'}</dd>
+        <dt>Phone</dt><dd>${esc(lead.phone || '—')}</dd>
         <dt>Country</dt><dd>${esc(lead.country || '—')}</dd>
-        <dt>Industry</dt><dd>${esc(lead.industry || '—')}</dd>
+        <dt>Category</dt><dd>${esc(lead.industry || '—')}</dd>
+        <dt>Service</dt><dd>${esc(lead.service || '—')}</dd>
+        <dt>Source</dt><dd>${esc(lead.source || '—')}</dd>
+        <dt>Agent</dt><dd>${esc(agentLabel(lead, dir) || '—')}</dd>
         <dt>Sales rep</dt><dd>${esc(dirName(dir, lead.assigned_to) || 'Not assigned')}</dd>
-        <dt>Added by</dt><dd>${esc(dirName(dir, lead.created_by) || '—')}, ${esc(fmtDateOfIso(lead.created_at))}</dd>
+        <dt>Next follow-up</dt><dd>${lead.next_follow_up ? esc(fmtDate(lead.next_follow_up)) : 'None'}</dd>
+        <dt>Added</dt><dd>${esc(fmtDateOfIso(lead.created_at))}${lead.created_by ? `, by ${esc(dirName(dir, lead.created_by))}` : ', via the lead form'}</dd>
       </dl>
-      <div><div class="section-title">Notes</div>${lead.notes ? `<div class="desc">${esc(lead.notes)}</div>` : '<p class="muted small">No notes.</p>'}</div>`;
+      <div><div class="section-title">Notes / requirements</div>${lead.notes ? `<div class="desc">${esc(lead.notes)}</div>` : '<p class="muted small">No notes.</p>'}</div>`;
     let foot = '';
     if (can('leads', 'delete')) foot += `<button class="btn btn-ghost btn-danger" data-act="delete">${icon('trash', 14)}Delete</button>`;
     foot += '<span style="flex:1"></span>';
-    if (canEdit) foot += `<button class="btn" data-act="edit">${icon('edit', 14)}Edit</button>`;
-    if (canEdit && lead.status !== 'won') foot += `<button class="btn btn-success" data-act="won">${icon('trophy', 14)}Mark as won</button>`;
+    if (canEdit) foot += `<button class="btn btn-primary" data-act="edit">${icon('edit', 14)}Edit lead</button>`;
     let footEl = drawer.querySelector('.drawer-foot');
     if (!footEl) { footEl = document.createElement('div'); footEl.className = 'drawer-foot'; drawer.append(footEl); }
     footEl.innerHTML = foot;
 
-    drawer.querySelectorAll('[data-status]').forEach((b) => b.onclick = async () => {
-      try { await q(supabase.from('leads').update({ status: b.dataset.status }).eq('id', id)); toast(`Moved to ${LEAD_STATUS[b.dataset.status]}`); changed(); }
-      catch (e) { toast(e.message, 'error'); }
-    });
+    drawer.querySelectorAll('[data-status]').forEach((b) => b.onclick = () => busy(b, async () => {
+      try {
+        await q(supabase.from('leads').update({ status: b.dataset.status }).eq('id', id));
+        toast(b.dataset.status === 'won' ? 'Marked as won. Admin and managers were notified.' : `Moved to ${STAGES[b.dataset.status]}`);
+        changed();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
     drawer.querySelector('[data-client]')?.addEventListener('click', async (e) => {
       const { openClientDrawer } = await import('./clients.js');
       closeDrawer(); openClientDrawer(Number(e.currentTarget.dataset.client));
     });
-    footEl.querySelectorAll('[data-act]').forEach((b) => b.onclick = () => busy(b, async () => {
+    drawer.querySelectorAll('[data-act]').forEach((b) => b.onclick = () => busy(b, async () => {
       try {
         if (b.dataset.act === 'edit') return openLeadForm(lead);
-        if (b.dataset.act === 'won') {
-          const ok = await confirmDialog({ title: `Mark ${lead.company} as won?`, text: 'The lead turns green and a client is created with these details, ready for onboarding, invoices and files.', confirm: 'Mark as won' });
+        if (b.dataset.act === 'convert') {
+          const ok = await confirmDialog({ title: `Convert ${lead.company} to a client?`, text: 'A client is created with these details. The admin and managers get notified to assign a project manager.', confirm: 'Convert to client' });
           if (!ok) return;
-          await rpc('lead_mark_won', { p_lead: id });
-          toast('Lead won. Client created');
+          await rpc('lead_convert', { p_lead: id });
+          toast('Converted to client');
           changed();
         }
         if (b.dataset.act === 'delete') {
@@ -219,31 +276,32 @@ function parseCSV(text) {
   return rows.filter((r) => r.some((x) => x.trim()));
 }
 const FIELD_MATCH = [
-  ['company', /company|brand|business|store name|shop|^name$/],
-  ['contact_name', /contact|person|owner|first name|full name/],
+  ['company', /company|brand|business|store name|shop/],
+  ['contact_name', /full name|contact|person|owner|lead name|^name$/],
   ['email', /e-?mail/],
   ['phone', /phone|mobile|whatsapp|number/],
-  ['website', /website|url|site|domain|store url|link/],
+  ['website', /website|url|site|domain|link/],
   ['country', /country|location/],
   ['industry', /industry|niche|category/],
+  ['service', /service/],
   ['source', /source|channel/],
-  ['estimated_value', /value|budget|revenue|spend/],
-  ['notes', /note|comment|description/],
+  ['currency', /currency/],
+  ['budget', /budget|value|spend|amount/],
+  ['notes', /note|comment|description|requirement/],
 ];
 
 export function openImport() {
   const m = openModal({
-    title: 'Import leads from CSV',
+    title: 'Import leads from CSV', icon: 'upload', subtitle: 'From Google Sheets or Excel: File → Download → CSV',
     body: `
-      <p class="muted">Export from Google Sheets or Excel as CSV. The first row must have column names like <b>Company</b>, Contact, Email, Phone, Website, Country, Industry, Source, Value, Notes.</p>
+      <p class="muted">The first row needs column names like <b>Full name</b>, <b>Company</b>, Email, Phone, Country, Category, Service, Source, Currency, Budget, Notes.</p>
       <div class="dropzone"><input type="file" accept=".csv,text/csv" id="csv-file" aria-label="CSV file"></div>
       <div id="csv-preview"></div>
       <div class="form-error hidden" id="csv-err"></div>`,
     foot: '<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-go disabled>Import leads</button>',
   });
   let records = [];
-  const err = m.querySelector('#csv-err');
-  const go = m.querySelector('[data-go]');
+  const err = m.querySelector('#csv-err'); const go = m.querySelector('[data-go]');
   m.querySelector('[data-cancel]').onclick = () => m.close();
   m.querySelector('#csv-file').onchange = async (e) => {
     err.classList.add('hidden'); go.disabled = true; records = [];
@@ -252,46 +310,56 @@ export function openImport() {
     if (rows.length < 2) { err.textContent = 'The file needs a header row and at least one lead.'; err.classList.remove('hidden'); return; }
     const headers = rows[0].map((h) => h.trim().toLowerCase());
     const map = {};
-    headers.forEach((h, i) => { const f = FIELD_MATCH.find(([key, re]) => !Object.values(map).includes(key) && re.test(h)); if (f && map[i] === undefined) map[i] = f[0]; });
-    if (!Object.values(map).includes('company')) { err.textContent = 'Couldn\'t find a Company column. Rename the column with the business name to "Company".'; err.classList.remove('hidden'); return; }
+    headers.forEach((h, i) => { const f = FIELD_MATCH.find(([key, re]) => !Object.values(map).includes(key) && re.test(h)); if (f) map[i] = f[0]; });
+    if (!Object.values(map).includes('company') && !Object.values(map).includes('contact_name')) { err.textContent = 'Couldn\'t find a Company or Full name column.'; err.classList.remove('hidden'); return; }
+    const me = state.profile.id;
     records = rows.slice(1).map((r) => {
       const o = {};
-      Object.entries(map).forEach(([i, key]) => { const v = (r[i] || '').trim(); if (v) o[key] = key === 'estimated_value' ? Number(v.replace(/[^0-9.]/g, '')) || null : v.slice(0, key === 'notes' ? 4000 : 200); });
+      Object.entries(map).forEach(([i, key]) => {
+        const v = (r[i] || '').trim(); if (!v) return;
+        if (key === 'budget') o.budget = Number(v.replace(/[^0-9.]/g, '')) || null;
+        else if (key === 'currency') o.currency = v.toUpperCase().replace('STG', 'GBP').replace(/[^A-Z]/g, '').slice(0, 8);
+        else o[key] = v.slice(0, key === 'notes' ? 4000 : 200);
+      });
+      if (!o.company) o.company = o.contact_name;
+      if (state.myRoles.includes('lead_gen')) o.agent_id = me;
       return o;
     }).filter((o) => o.company).slice(0, 2000);
     m.querySelector('#csv-preview').innerHTML = `<div class="note info">Found <b>${records.length}</b> leads. Columns used: ${esc(Object.values(map).join(', '))}.</div>
-      <div class="panel" style="margin-top:10px"><div class="list">${records.slice(0, 3).map((r) => `<div class="list-item" style="padding:9px 14px"><div class="grow"><div class="title">${esc(r.company)}</div><div class="meta">${esc([r.contact_name, r.email, r.country].filter(Boolean).join(', '))}</div></div></div>`).join('')}</div></div>`;
+      <div class="panel" style="margin-top:10px"><div class="list">${records.slice(0, 3).map((r) => `<div class="list-item" style="padding:9px 14px"><div class="grow"><div class="title">${esc(r.contact_name || r.company)}</div><div class="meta">${esc([r.company, r.email, r.country].filter(Boolean).join(', '))}</div></div></div>`).join('')}</div></div>`;
     go.disabled = !records.length;
   };
   go.onclick = () => busy(go, async () => {
     try {
       for (let i = 0; i < records.length; i += 200) await q(supabase.from('leads').insert(records.slice(i, i + 200)));
-      toast(`${records.length} leads imported`);
-      m.close(); changed();
+      toast(`${records.length} leads imported`); m.close(); changed();
     } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
   });
 }
 
 // Small list used on role tabs
 export async function leadsPanel(kind) {
-  const all = await q(supabase.from('leads').select('id, company, contact_name, status, created_at, created_by, assigned_to, source').order('created_at', { ascending: false }).limit(500));
+  const all = await q(supabase.from('leads').select('id, company, contact_name, status, created_at, created_by, agent_id, assigned_to, source, client_id').order('created_at', { ascending: false }).limit(500));
   const me = state.profile.id;
   let list; let title; let sub;
   if (kind === 'lead_gen') {
-    list = all.filter((l) => l.created_by === me);
+    list = all.filter((l) => l.created_by === me || l.agent_id === me);
     const week = list.filter((l) => localDate(l.created_at) >= startOfWeek(todayStr())).length;
-    title = 'Leads you added'; sub = `${week} this week, ${list.length} in total`;
+    title = 'Your leads'; sub = `${week} this week, ${list.length} in total`;
   } else {
     list = all.filter((l) => OPEN.includes(l.status)).sort((a, b) => (b.assigned_to === me) - (a.assigned_to === me));
-    title = kind === 'cold_caller' ? 'Leads to call' : 'Leads to work'; sub = `${list.length} open leads${list.filter((l) => l.assigned_to === me).length ? `, ${list.filter((l) => l.assigned_to === me).length} assigned to you` : ''}`;
+    const mine = list.filter((l) => l.assigned_to === me).length;
+    title = kind === 'cold_caller' ? 'Leads to call' : 'Leads to work'; sub = `${list.length} open leads${mine ? `, ${mine} assigned to you` : ''}`;
   }
   const canEdit = can('leads', 'edit');
   return `
     <section class="panel role-panel">
       <div class="panel-head"><div><h2>${title}</h2><p>${esc(sub)}</p></div>
-        <div class="row">${kind === 'lead_gen' && canEdit ? `<button class="btn btn-sm" data-import>${icon('upload', 14)}Import CSV</button><button class="btn btn-sm btn-primary" data-new-lead>${icon('plus', 14)}New lead</button>` : ''}<a class="btn btn-sm btn-ghost" href="#/leads${kind === 'lead_gen' ? '?scope=mine' : '?status=open'}">All leads</a></div></div>
+        <div class="row wrap">${kind === 'lead_gen' ? `<button class="btn btn-sm" data-share>${icon('share', 14)}Share form</button>` : ''}
+          ${kind === 'lead_gen' && canEdit ? `<button class="btn btn-sm" data-import>${icon('upload', 14)}Import CSV</button><button class="btn btn-sm btn-primary" data-new-lead>${icon('plus', 14)}New lead</button>` : ''}
+          <a class="btn btn-sm btn-ghost" href="#/leads${kind === 'lead_gen' ? '?scope=mine' : '?status=open'}">All leads</a></div></div>
       <div class="list">${list.length ? list.slice(0, 6).map((l) => `
-        <div class="list-item clickable" data-lead="${l.id}"><div class="grow"><div class="title">${esc(l.company)}</div><div class="meta"><span>${esc(l.contact_name || l.source || '')}</span><span>${esc(fmtRelative(l.created_at))}</span></div></div>${leadBadge(l.status)}</div>`).join('')
-        : emptyState(kind === 'lead_gen' ? 'No leads yet' : 'No open leads', kind === 'lead_gen' ? 'Add your first lead. Sales reps see it right away.' : 'New leads from lead generation show up here.')}</div>
+        <div class="list-item clickable" data-lead="${l.id}"><div class="grow"><div class="title">${esc(l.contact_name || l.company)}</div><div class="meta"><span>${esc(l.contact_name ? l.company : '')}</span><span>${esc(fmtRelative(l.created_at))}</span></div></div>${l.client_id ? '<span class="badge won">Client</span>' : leadBadge(l.status)}</div>`).join('')
+        : emptyState(kind === 'lead_gen' ? 'No leads yet' : 'No open leads', kind === 'lead_gen' ? 'Add your first lead or share the form.' : 'New leads from lead generation show up here.')}</div>
     </section>`;
 }

@@ -207,6 +207,73 @@ api.post('/members/:id/access-link', requireAdmin, wrap(async (req, res) => {
   res.json({ link: result.link, type: result.type });
 }));
 
+// ---------- Public lead form (no login) ----------
+const formHits = new Map();
+function formLimit(req) {
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+  const now = Date.now();
+  const list = (formHits.get(ip) || []).filter((t) => now - t < 10 * 60_000);
+  list.push(now); formHits.set(ip, list);
+  if (formHits.size > 5000) formHits.clear();
+  return list.length <= 15;
+}
+const STAGES = ['new', 'contacted', 'qualified', 'meeting', 'proposal', 'negotiation'];
+const PRIORITIES = ['low', 'medium', 'high', 'urgent'];
+const titleCase = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+
+async function leadAgents() {
+  const { data } = await db.from('member_roles').select('member_id, profiles!inner(first_name, last_name, status)').eq('role_key', 'lead_gen');
+  return (data || []).filter((r) => r.profiles.status === 'active')
+    .map((r) => ({ id: r.member_id, name: `${r.profiles.first_name} ${r.profiles.last_name}`.trim() }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+api.get('/public/form', wrap(async (req, res) => {
+  if (!configured) throw new HttpError(500, 'The form is not connected yet');
+  const { data: settings } = await db.from('app_settings').select('company_name').eq('id', 1).maybeSingle();
+  res.set('Cache-Control', 'no-store');
+  res.json({ company: settings?.company_name || 'Ecometrix Hub', agents: await leadAgents() });
+}));
+
+api.post('/public/lead', wrap(async (req, res) => {
+  if (!configured) throw new HttpError(500, 'The form is not connected yet');
+  if (!formLimit(req)) throw new HttpError(429, 'Too many submissions. Wait a few minutes and try again.');
+  const b = req.body || {};
+  if (b.hp) return res.json({ ok: true }); // bot
+  const lead = {
+    contact_name: titleCase(clean(b.contact_name, 120)),
+    company: clean(b.company, 200),
+    email: clean(b.email, 160) || null,
+    phone: clean(b.phone, 40) || null,
+    country: clean(b.country, 60) || null,
+    industry: clean(b.industry, 80) || null,
+    service: clean(b.service, 200) || null,
+    currency: (clean(b.currency, 8) || 'USD').toUpperCase().replace(/[^A-Z]/g, '') || 'USD',
+    budget: b.budget === null || b.budget === '' || b.budget === undefined ? null : Number(b.budget),
+    source: clean(b.source, 60) || 'Website',
+    status: STAGES.includes(b.status) ? b.status : 'new',
+    priority: PRIORITIES.includes(b.priority) ? b.priority : 'medium',
+    notes: clean(b.notes, 4000) || '',
+    agent_id: null,
+    agent_name: null,
+  };
+  if (!lead.contact_name) throw new HttpError(400, 'Enter the lead\'s full name');
+  if (!lead.company) throw new HttpError(400, 'Enter the company or brand name');
+  if (lead.email && !EMAIL_RE.test(lead.email)) throw new HttpError(400, 'That email doesn\'t look right');
+  if (lead.budget !== null && !(lead.budget >= 0 && lead.budget < 1e10)) throw new HttpError(400, 'Budget must be a number');
+  if (b.agent_id) {
+    const agents = await leadAgents();
+    if (!agents.some((a) => a.id === b.agent_id)) throw new HttpError(400, 'Pick your name from the list');
+    lead.agent_id = b.agent_id;
+  } else {
+    lead.agent_name = titleCase(clean(b.agent_name, 80));
+    if (!lead.agent_name) throw new HttpError(400, 'Select or type the agent name');
+  }
+  const { error } = await db.from('leads').insert(lead);
+  if (error) throw new HttpError(400, error.message);
+  res.status(201).json({ ok: true });
+}));
+
 app.use('/api', api);
 
 // Local development: serve the frontend too (Vercel serves /public from its CDN)
