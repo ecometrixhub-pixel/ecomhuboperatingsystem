@@ -19,6 +19,7 @@ function waLink(phone, country) {
   else if (d.startsWith('0') && (!country || country === 'Pakistan')) d = '92' + d.slice(1);
   return `https://wa.me/${d}`;
 }
+export const canAssignLeads = () => state.isAdmin || state.myRoles.includes('sales_rep');
 export function agentLabel(l, dir) { return dirName(dir, l.agent_id) || l.agent_name || dirName(dir, l.created_by) || ''; }
 
 export async function render({ el, params }) {
@@ -27,6 +28,7 @@ export async function render({ el, params }) {
   let scope = params.get('scope') || 'all';
   let search = '';
   const canEdit = can('leads', 'edit');
+  const canAssign = canAssignLeads();
 
   el.innerHTML = `
     <div class="page-head">
@@ -36,11 +38,12 @@ export async function render({ el, params }) {
         ${canEdit ? `<button class="btn" id="import">${icon('upload', 15)}Import CSV</button><button class="btn btn-primary" id="new">${icon('plus', 15)}New lead</button>` : ''}
       </div>
     </div>
+    <div id="unassigned-note"></div>
     <div class="toolbar"><div class="seg" role="group" aria-label="Stage" id="status"></div></div>
     <div class="toolbar">
       <div class="search grow">${icon('search', 15)}<input class="input" id="q" placeholder="Search name, company, email, phone" aria-label="Search leads"></div>
       <select class="select" id="scope" style="width:auto" aria-label="Whose leads">
-        <option value="all">All leads</option><option value="mine">My leads (agent / added by me)</option><option value="assigned">Assigned to me</option>
+        <option value="all">All leads</option><option value="mine">My leads (agent / added by me)</option><option value="assigned">Assigned to me</option><option value="unassigned">Not assigned yet</option>
       </select>
     </div>
     <section class="panel"><div class="table-wrap" id="table">${loadingBlock(5)}</div></section>`;
@@ -56,12 +59,15 @@ export async function render({ el, params }) {
   const labels = [['all', 'All'], ['open', 'Open'], ...OPEN.map((k) => [k, STAGES[k]]), ['won', 'Won'], ['converted', 'Converted to client'], ['lost', 'Lost']];
 
   function draw() {
+    const waiting = leads.filter((l) => !l.assigned_to && !l.client_id && OPEN.includes(l.status)).length;
+    el.querySelector('#unassigned-note').innerHTML = canAssign && waiting && scope !== 'unassigned'
+      ? `<div class="note warn" style="margin-bottom:14px">${icon('target', 14)} <b>${waiting}</b> ${waiting === 1 ? 'lead is' : 'leads are'} waiting for a sales rep. <button class="linkish" data-show-unassigned>Show them</button></div>` : '';
     el.querySelector('#status').innerHTML = labels.map(([k, v]) =>
       `<button data-s="${k}" aria-pressed="${status === k}">${v}<span class="count">${leads.filter(groups[k]).length}</span></button>`).join('');
     const s = search.toLowerCase();
     const me = state.profile.id;
     const list = leads.filter((l) => groups[status](l)
-      && (scope === 'all' || (scope === 'mine' ? (l.created_by === me || l.agent_id === me) : l.assigned_to === me))
+      && (scope === 'all' || (scope === 'mine' ? (l.created_by === me || l.agent_id === me) : scope === 'unassigned' ? (!l.assigned_to && !l.client_id && OPEN.includes(l.status)) : l.assigned_to === me))
       && (!s || `${l.contact_name || ''} ${l.company} ${l.email || ''} ${l.phone || ''}`.toLowerCase().includes(s)));
     if (!leads.length) {
       table.innerHTML = emptyState('No leads yet', canEdit ? 'Add a lead, import a CSV, or share the lead form.' : 'Leads added by the team show up here.', canEdit ? '<button class="btn btn-primary" data-new>New lead</button>' : '');
@@ -82,7 +88,7 @@ export async function render({ el, params }) {
         <td>${canEdit && !l.client_id
           ? `<select class="stage-select" data-stage="${esc(l.status)}" data-stage-for="${l.id}" aria-label="Pipeline status for ${esc(l.company)}">${Object.entries(STAGES).map(([k, v]) => `<option value="${k}" ${l.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`
           : `<select class="stage-select" data-stage="${esc(l.status)}" disabled aria-label="Pipeline status"><option>${l.client_id ? 'Converted' : esc(STAGES[l.status])}</option></select>`}</td>
-        <td>${canEdit && !l.client_id
+        <td>${canAssign && !l.client_id
           ? `<select class="assign-select ${l.assigned_to ? 'set' : ''}" data-assign-for="${l.id}" aria-label="Sales representative for ${esc(l.company)}"><option value="">Unassigned</option>${reps.map((r) => `<option value="${r.id}" ${l.assigned_to === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}${l.assigned_to && !reps.some((r) => r.id === l.assigned_to) ? `<option value="${l.assigned_to}" selected>${esc(rep || 'Former member')}</option>` : ''}</select>`
           : rep ? `<div class="row" style="gap:8px"><span class="mini-av">${initial(rep)}</span><span>${esc(rep)}</span></div>` : '<span class="muted small">Unassigned</span>'}</td>
         <td>${l.budget !== null && l.budget !== undefined ? `<div style="font-weight:600" class="money">${esc(fmtBudget(l.budget, l.currency))}</div>` : '<div class="muted">—</div>'}<div class="small muted">${l.source ? `via ${esc(l.source)}` : ''}</div></td>
@@ -107,6 +113,7 @@ export async function render({ el, params }) {
   el.querySelector('#status').addEventListener('click', (e) => { const b = e.target.closest('[data-s]'); if (b) { status = b.dataset.s; draw(); } });
   el.querySelector('#q').addEventListener('input', (e) => { search = e.target.value.trim(); draw(); });
   el.querySelector('#scope').addEventListener('change', (e) => { scope = e.target.value; draw(); });
+  el.querySelector('#unassigned-note').addEventListener('click', (e) => { if (e.target.closest('[data-show-unassigned]')) { scope = 'unassigned'; el.querySelector('#scope').value = scope; draw(); } });
   el.querySelector('#new')?.addEventListener('click', () => openLeadForm());
   el.querySelector('#import')?.addEventListener('click', () => openImport());
   el.querySelector('#share').addEventListener('click', () => shareForm());
@@ -149,7 +156,7 @@ export function shareForm() {
     title: 'Share the lead form', icon: 'share', subtitle: 'Anyone with the link can submit a lead. No login needed.',
     body: `
       <div class="link-box"><input class="input" readonly value="${esc(link)}" aria-label="Form link"><button class="btn" data-copy>${icon('copy', 14)}Copy</button></div>
-      <p class="small muted">The agent list shows everyone with the Lead Generation role, plus Other. New leads land in Leads and the admin and managers get a notification.</p>`,
+      <p class="small muted">The agent list shows everyone with the Lead Generation role, plus Other. New leads land in Leads. The admin, managers and the Sales team get a notification, and a sales rep picks them up.</p>`,
     foot: `<a class="btn" href="${esc(link)}" target="_blank" rel="noopener">Open form</a><a class="btn btn-primary" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">${icon('send', 14)}Share on WhatsApp</a>`,
   });
   m.querySelector('[data-copy]').onclick = async (e) => { if (await copyText(link)) { e.currentTarget.innerHTML = `${icon('check', 14)}Copied`; toast('Link copied'); } };
@@ -166,7 +173,7 @@ export async function openLeadForm(lead = null) {
     subtitle: lead ? esc(lead.company) : 'Enroll a new prospect into the Ecometrix Hub pipeline',
     icon: 'userPlus',
     wide: true,
-    body: `<form id="lf" novalidate>${leadFormHTML({ lead: lead || {}, agents, reps, defaultAgent })}</form>`,
+    body: `<form id="lf" novalidate>${leadFormHTML({ lead: lead || {}, agents, reps, defaultAgent, canAssign: canAssignLeads() })}</form>`,
     foot: `<button class="btn btn-ghost" data-cancel>Cancel</button><button class="btn btn-primary btn-lg" data-save>${lead ? 'Save lead' : 'Create lead'}</button>`,
   });
   bindLeadForm(m);
@@ -366,8 +373,26 @@ export async function leadsPanel(kind) {
     const mine = list.filter((l) => l.assigned_to === me).length;
     title = kind === 'cold_caller' ? 'Leads to call' : 'Leads to work'; sub = `${list.length} open leads${mine ? `, ${mine} assigned to you` : ''}`;
   }
+  // Sales team: leads nobody has picked up yet, with an assign dropdown
+  let pool = '';
+  if (kind === 'sales_rep' && canAssignLeads()) {
+    const dir = await loadDirectory();
+    const reps = dir.filter((d) => d.roles.includes('sales_rep') && d.status !== 'inactive');
+    const open = all.filter((l) => !l.assigned_to && !l.client_id && OPEN.includes(l.status));
+    pool = `
+    <section class="panel role-panel" style="margin-bottom:16px">
+      <div class="panel-head"><div><h2>Not assigned yet</h2><p>${open.length ? `${open.length} new ${open.length === 1 ? 'lead needs' : 'leads need'} a sales rep` : 'Every lead has a sales rep'}</p></div>
+        <a class="btn btn-sm btn-ghost" href="#/leads?scope=unassigned">See all</a></div>
+      <div class="list">${open.length ? open.slice(0, 8).map((l) => `
+        <div class="list-item" style="flex-wrap:wrap"><div class="grow clickable" data-lead="${l.id}" style="min-width:160px"><div class="title">${esc(l.contact_name || l.company)}</div>
+          <div class="meta"><span>${esc(l.contact_name ? l.company : '')}</span><span>By ${esc(agentLabel(l, dir) || 'lead form')}</span><span>${esc(fmtRelative(l.created_at))}</span></div></div>
+          <button class="btn btn-sm btn-primary" data-take="${l.id}">${icon('check', 13)}Take it</button>
+          <select class="assign-select" data-assign-for="${l.id}" aria-label="Assign ${esc(l.company)}"><option value="">Assign to…</option>${reps.map((r) => `<option value="${r.id}">${esc(r.name)}${r.id === me ? ' (me)' : ''}</option>`).join('')}</select>
+        </div>`).join('') : emptyState('Nothing waiting', 'New leads from Lead Generation and the lead form show up here first.')}</div>
+    </section>`;
+  }
   const canEdit = can('leads', 'edit');
-  return `
+  return `${pool}
     <section class="panel role-panel">
       <div class="panel-head"><div><h2>${title}</h2><p>${esc(sub)}</p></div>
         <div class="row wrap">${kind === 'lead_gen' ? `<button class="btn btn-sm" data-share>${icon('share', 14)}Share form</button>` : ''}
@@ -377,4 +402,18 @@ export async function leadsPanel(kind) {
         <div class="list-item clickable" data-lead="${l.id}"><div class="grow"><div class="title">${esc(l.contact_name || l.company)}</div><div class="meta"><span>${esc(l.contact_name ? l.company : '')}</span><span>${esc(fmtRelative(l.created_at))}</span></div></div>${l.client_id ? '<span class="badge won">Client</span>' : leadBadge(l.status)}</div>`).join('')
         : emptyState(kind === 'lead_gen' ? 'No leads yet' : 'No open leads', kind === 'lead_gen' ? 'Add your first lead or share the form.' : 'New leads from lead generation show up here.')}</div>
     </section>`;
+}
+
+// Wire the Sales rep "Not assigned yet" panel
+export function bindLeadsPanel(root) {
+  const assign = async (id, to, ctl) => {
+    ctl.disabled = true;
+    try {
+      await q(supabase.from('leads').update({ assigned_to: to }).eq('id', id));
+      toast(to === state.profile.id ? 'The lead is yours now' : 'Lead assigned. They were notified.');
+      changed();
+    } catch (e) { toast(e.message, 'error'); ctl.disabled = false; }
+  };
+  root.querySelectorAll('[data-take]').forEach((b) => b.onclick = () => assign(Number(b.dataset.take), state.profile.id, b));
+  root.querySelectorAll('[data-assign-for]').forEach((sel) => sel.onchange = () => { if (sel.value) assign(Number(sel.dataset.assignFor), sel.value, sel); });
 }

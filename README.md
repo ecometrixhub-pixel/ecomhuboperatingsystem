@@ -61,6 +61,7 @@ HTML + CSS + JavaScript (frontend), Node/Express (server), Supabase (database + 
 - **Project team + approval**: Admin/Manager kisi ko project mein add kare → PM approve karta hai. PM kisi ko add kare → Admin ya koi bhi Manager approve kare. Har request ki history rehti hai (kisne maanga, kisne approve kiya, kab). Team → member profile → **Add to a project** se bhi add hota hai.
 - **Project workspace**: project kholo → upar left project ka naam (click karke doosre project pe jao). Tabs: Overview, Live view (website + socials preview), Requirements (checklist), Tasks, Files, Finances, Settings (details + team).
 - **Leads**: "Assigned to" dropdown mein sirf Sales Representatives aate hain.
+- **Finance**: Dashboard (cash, revenue, expenses, profit, fixed costs), Expenses, Bills & salaries (reminders + auto charge), Investments, Invoices, Monthly report (Print/PDF, CSV). Amounts Settings wali currency mein hain. Salaries sirf Admin aur Managers dekh sakte hain.
 - Task banate waqt **Role** chuno → "Assign to" list mein sirf us role wale members aate hain → task us member ke **My tasks** aur us role ke tab mein foran dikhta hai.
 
 ## Public lead form

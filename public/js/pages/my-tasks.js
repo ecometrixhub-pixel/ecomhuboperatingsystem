@@ -111,6 +111,7 @@ export async function render({ el, arg: role, setTitle }) {
         rp.querySelector('[data-import]')?.addEventListener('click', () => m.openImport());
         rp.querySelector('[data-share]')?.addEventListener('click', () => m.shareForm());
         rp.querySelectorAll('[data-lead]').forEach((x) => x.onclick = () => m.openLeadDrawer(Number(x.dataset.lead)));
+        m.bindLeadsPanel(rp);
       } else if (role === 'project_manager' && canAny('projects')) {
         const m = await import('./projects.js');
         rp.innerHTML = await m.projectsPanel();

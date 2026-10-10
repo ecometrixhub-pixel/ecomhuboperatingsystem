@@ -2493,4 +2493,430 @@ grant all on public.project_requirements to service_role;
 revoke execute on all functions in schema public from public, anon;
 revoke execute on function public.leads_assign_check(), public.requirements_before_write(), public.requirements_after_write() from authenticated;
 
+
+
+-- =====================================================================
+--  PART 6 — Leads land with the Sales team. Only a Sales Representative,
+--  a manager or the admin can assign them.
+-- =====================================================================
+
+create or replace function public.leads_assign_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if (tg_op = 'INSERT' and new.assigned_to is not null) or (tg_op = 'UPDATE' and new.assigned_to is distinct from old.assigned_to) then
+    if auth.uid() is not null and not (is_manager() or exists (select 1 from member_roles where member_id = auth.uid() and role_key = 'sales_rep')) then
+      raise exception 'Only a Sales Representative, a manager or the admin can assign leads';
+    end if;
+    if new.assigned_to is not null and not exists (select 1 from member_roles m join profiles p on p.id = m.member_id
+                      where m.member_id = new.assigned_to and m.role_key = 'sales_rep' and p.status in ('active', 'invited')) then
+      raise exception 'Leads can only be assigned to a Sales Representative';
+    end if;
+  end if;
+  return new;
+end $$;
+
+-- New lead → admin + managers, and the Sales team when nobody is assigned yet
+create or replace function public.leads_notify() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_link text := '#/leads?open=' || new.id;
+        v_who text := coalesce(member_label(auth.uid()), coalesce('Lead form (' || coalesce(member_name(new.agent_id), new.agent_name) || ')', 'Lead form'));
+begin
+  if tg_op = 'INSERT' then
+    perform notify_managers('lead', case when auth.uid() is null then 'New lead from the form: ' else 'New lead: ' end || new.company,
+      'Added by ' || v_who || case when new.assigned_to is null then '. Not assigned yet.' else '' end, v_link);
+    if new.assigned_to is null then
+      perform notify_role('sales_rep', 'lead', 'New lead to pick up: ' || new.company, 'Added by ' || v_who, '#/leads?scope=unassigned');
+    else
+      perform notify(new.assigned_to, 'lead', 'New lead assigned: ' || new.company, 'Added by ' || v_who, v_link);
+    end if;
+    if auth.uid() is null then
+      perform notify(new.agent_id, 'lead', 'Lead submitted for you: ' || new.company, 'Came in through the lead form', v_link);
+    end if;
+    return new;
+  end if;
+  if new.assigned_to is distinct from old.assigned_to then
+    perform notify(new.assigned_to, 'lead', 'Lead assigned to you: ' || new.company, 'By ' || v_who, v_link);
+    perform notify(old.assigned_to, 'lead', 'Lead moved to someone else: ' || new.company, 'By ' || v_who, v_link);
+  end if;
+  if new.status is distinct from old.status then
+    if new.status in ('won', 'lost') then
+      perform notify_managers('lead', 'Lead ' || new.status || ': ' || new.company, 'By ' || v_who || case when new.status = 'won' then '. Convert it to a client.' else '' end, v_link);
+    end if;
+    perform notify(new.assigned_to, 'lead', new.company || ' moved to ' || new.status, 'By ' || v_who, v_link);
+    perform notify(coalesce(new.agent_id, new.created_by), 'lead', 'Your lead ' || new.company || ' is ' || new.status, 'By ' || v_who, v_link);
+  end if;
+  return new;
+end $$;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.leads_assign_check(), public.leads_notify() from authenticated;
+
+
+
+-- =====================================================================
+--  PART 7 — Business finance: expenses, investments, recurring bills
+--  (tools, salaries) with reminders, monthly report and dashboard.
+--  Salaries are visible only to the admin and managers.
+-- =====================================================================
+
+create table if not exists public.recurring_expenses (
+  id                    bigint generated always as identity primary key,
+  title                 text not null check (char_length(title) between 1 and 200),
+  category              text not null default 'tools',
+  amount                numeric(12, 2) not null check (amount >= 0),
+  frequency             text not null default 'monthly' check (frequency in ('weekly', 'monthly', 'quarterly', 'yearly')),
+  next_due              date not null,
+  vendor                text,
+  payee_member          uuid references public.profiles(id),
+  auto_post             boolean not null default false,
+  remind_days           int not null default 3 check (remind_days between 0 and 30),
+  active                boolean not null default true,
+  notes                 text not null default '',
+  reminded_upcoming_for date,
+  reminded_due_for      date,
+  created_by            uuid references public.profiles(id),
+  created_at            timestamptz not null default now(),
+  updated_at            timestamptz not null default now()
+);
+create index if not exists recurring_due_idx on public.recurring_expenses (active, next_due);
+
+create table if not exists public.expenses (
+  id            bigint generated always as identity primary key,
+  title         text not null check (char_length(title) between 1 and 200),
+  category      text not null default 'other',
+  amount        numeric(12, 2) not null check (amount >= 0),
+  spent_on      date not null default current_date,
+  vendor        text,
+  notes         text not null default '',
+  paid_by       uuid references public.profiles(id),
+  payee_member  uuid references public.profiles(id),
+  recurring_id  bigint references public.recurring_expenses(id) on delete set null,
+  period        date,
+  created_by    uuid references public.profiles(id),
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists expenses_spent_idx on public.expenses (spent_on desc);
+create index if not exists expenses_category_idx on public.expenses (category, spent_on);
+create unique index if not exists expenses_recurring_period_uq on public.expenses (recurring_id, period) where recurring_id is not null;
+
+create table if not exists public.investments (
+  id           bigint generated always as identity primary key,
+  source       text not null check (char_length(source) between 1 and 200),
+  investor_id  uuid references public.profiles(id),
+  kind         text not null default 'capital' check (kind in ('capital', 'loan', 'grant', 'other')),
+  amount       numeric(12, 2) not null check (amount >= 0),
+  invested_on  date not null default current_date,
+  notes        text not null default '',
+  created_by   uuid references public.profiles(id),
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists investments_date_idx on public.investments (invested_on desc);
+
+create table if not exists public.finance_report_log (
+  month       date primary key,
+  created_at  timestamptz not null default now()
+);
+
+-- Finance permission, and salaries only for the admin / managers
+create or replace function public.can_money(p_category text, p_action text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select perm('finance', p_action) and (p_category is distinct from 'salary' or is_manager());
+$$;
+
+create or replace function public.fmt_money(p numeric) returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce((select currency from app_settings where id = 1), 'USD') || ' ' || to_char(round(coalesce(p, 0)), 'FM999,999,999,990');
+$$;
+
+create or replace function public.advance_due(p_date date, p_freq text) returns date
+language sql immutable as $$
+  select case p_freq when 'weekly' then p_date + 7
+                     when 'quarterly' then (p_date + interval '3 months')::date
+                     when 'yearly' then (p_date + interval '1 year')::date
+                     else (p_date + interval '1 month')::date end;
+$$;
+
+-- Notification to the admin, managers (co-founders) and, unless it's about salaries, the Finance team
+create or replace function public.notify_finance_people(p_salary boolean, p_title text, p_body text, p_link text)
+returns void language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  for r in select p.id from profiles p where p.status = 'active'
+             and (p.role = 'admin' or exists (select 1 from member_roles m where m.member_id = p.id and m.role_key = 'manager')
+                  or (not p_salary and exists (select 1 from member_roles m where m.member_id = p.id and m.role_key = 'finance'))) loop
+    insert into notifications (user_id, kind, title, body, link) values (r.id, 'finance', left(p_title, 200), left(coalesce(p_body, ''), 500), p_link);
+  end loop;
+end $$;
+
+-- ---------- Triggers ----------
+create or replace function public.money_before_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_by := coalesce(auth.uid(), new.created_by); new.created_at := now();
+  else
+    new.created_by := old.created_by; new.created_at := old.created_at;
+  end if;
+  new.updated_at := now();
+  if tg_table_name = 'recurring_expenses' then
+    if new.category = 'salary' and new.payee_member is null then raise exception 'Pick the team member this salary is for'; end if;
+  end if;
+  return new;
+end $$;
+
+create or replace function public.money_after_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_who text := coalesce(member_name(auth.uid()), 'System'); v_sal boolean;
+begin
+  if tg_table_name = 'expenses' then
+    v_sal := coalesce(new.category, old.category) = 'salary';
+    if tg_op = 'INSERT' then
+      perform log_event('expense_added', 'finance', new.id::text,
+        case when v_sal then 'Recorded a salary payment' else 'Added expense "' || new.title || '" (' || fmt_money(new.amount) || ')' end);
+      if new.recurring_id is null and auth.uid() is not null and not v_sal then
+        perform notify_managers('finance', 'New expense: ' || new.title || ' ' || fmt_money(new.amount), 'By ' || v_who, '#/finance?tab=expenses');
+      end if;
+    elsif tg_op = 'UPDATE' then
+      perform log_event('expense_updated', 'finance', new.id::text, case when v_sal then 'Updated a salary payment' else 'Updated expense "' || new.title || '"' end);
+    else
+      perform log_event('expense_deleted', 'finance', old.id::text, case when v_sal then 'Deleted a salary payment' else 'Deleted expense "' || old.title || '"' end);
+    end if;
+  elsif tg_table_name = 'recurring_expenses' then
+    v_sal := coalesce(new.category, old.category) = 'salary';
+    if tg_op = 'INSERT' then
+      perform log_event('recurring_added', 'finance', new.id::text, case when v_sal then 'Added a monthly salary' else 'Added recurring bill "' || new.title || '"' end);
+    elsif tg_op = 'DELETE' then
+      perform log_event('recurring_deleted', 'finance', old.id::text, case when v_sal then 'Removed a salary' else 'Removed recurring bill "' || old.title || '"' end);
+    end if;
+  elsif tg_table_name = 'investments' then
+    if tg_op = 'INSERT' then
+      perform log_event('investment_added', 'finance', new.id::text, 'Added investment from ' || new.source || ' (' || fmt_money(new.amount) || ')');
+      perform notify_managers('finance', 'New investment: ' || fmt_money(new.amount) || ' from ' || new.source, 'By ' || v_who, '#/finance?tab=investments');
+    elsif tg_op = 'DELETE' then
+      perform log_event('investment_deleted', 'finance', old.id::text, 'Deleted investment from ' || old.source);
+    end if;
+  end if;
+  return coalesce(new, old);
+end $$;
+
+do $$ declare t text; begin
+  foreach t in array array['expenses', 'recurring_expenses', 'investments'] loop
+    execute format('drop trigger if exists %I on public.%I', t || '_before', t);
+    execute format('create trigger %I before insert or update on public.%I for each row execute function public.money_before_write()', t || '_before', t);
+    execute format('drop trigger if exists %I on public.%I', t || '_after', t);
+    execute format('create trigger %I after insert or update or delete on public.%I for each row execute function public.money_after_write()', t || '_after', t);
+  end loop;
+end $$;
+
+-- ---------- Recurring bills: pay / skip ----------
+-- Internal: records the expense for the bill's current due date and moves the due date on
+create or replace function public.recurring_post(p_id bigint, p_amount numeric, p_paid_on date) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare r recurring_expenses%rowtype; v_id bigint;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  insert into expenses (title, category, amount, spent_on, vendor, payee_member, recurring_id, period, notes)
+  values (r.title, r.category, coalesce(p_amount, r.amount), coalesce(p_paid_on, r.next_due), r.vendor, r.payee_member, r.id, r.next_due,
+          case r.frequency when 'monthly' then 'For ' || to_char(r.next_due, 'Mon YYYY') else 'Due ' || to_char(r.next_due, 'DD Mon YYYY') end)
+  on conflict (recurring_id, period) where recurring_id is not null do nothing
+  returning id into v_id;
+  update recurring_expenses set next_due = advance_due(r.next_due, r.frequency) where id = p_id;
+  return v_id;
+end $$;
+
+create or replace function public.recurring_mark_paid(p_id bigint, p_amount numeric default null, p_paid_on date default null) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); r recurring_expenses%rowtype; v_id bigint;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  if not found then raise exception 'Bill not found'; end if;
+  if not can_money(r.category, 'edit') then raise exception 'You don''t have permission to record this payment'; end if;
+  if p_amount is not null and p_amount < 0 then raise exception 'Amount can''t be negative'; end if;
+  v_id := recurring_post(p_id, p_amount, coalesce(p_paid_on, (now() at time zone app_tz())::date));
+  perform log_event('recurring_paid', 'finance', p_id::text,
+    case when r.category = 'salary' then 'Paid salary of ' || coalesce(member_name(r.payee_member), 'a member') || ' for ' || to_char(r.next_due, 'Mon YYYY')
+         else 'Paid "' || r.title || '" due ' || to_char(r.next_due, 'DD Mon YYYY') end);
+  return v_id;
+end $$;
+
+create or replace function public.recurring_skip(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := assert_active(); r recurring_expenses%rowtype;
+begin
+  select * into r from recurring_expenses where id = p_id for update;
+  if not found then raise exception 'Bill not found'; end if;
+  if not can_money(r.category, 'edit') then raise exception 'You don''t have permission to change this bill'; end if;
+  update recurring_expenses set next_due = advance_due(r.next_due, r.frequency) where id = p_id;
+  perform log_event('recurring_skipped', 'finance', p_id::text, 'Skipped ' || case when r.category = 'salary' then 'a salary' else '"' || r.title || '"' end || ' due ' || to_char(r.next_due, 'DD Mon YYYY'));
+end $$;
+
+-- ---------- Reminders + auto charges + monthly report notice ----------
+-- Safe to call any number of times (the app calls it when someone opens it); each step happens once.
+create or replace function public.finance_sweep() returns int
+language plpgsql security definer set search_path = public as $$
+declare r recurring_expenses%rowtype; v_today date := (now() at time zone app_tz())::date; n int := 0; g int;
+        v_sal boolean; v_label text; v_prev date; v_rev numeric; v_exp numeric; v_link text := '#/finance?tab=recurring';
+begin
+  if auth.uid() is not null then perform assert_active(); end if;
+  perform pg_advisory_xact_lock(hashtext('ehos_finance_sweep'));
+  for r in select * from recurring_expenses where active and next_due <= v_today + remind_days order by next_due loop
+    v_sal := r.category = 'salary';
+    v_label := case when v_sal then 'Salary: ' || coalesce(member_name(r.payee_member), r.title) else r.title end;
+    if r.auto_post and r.next_due <= v_today then
+      g := 0;
+      while r.next_due <= v_today and g < 24 loop
+        perform recurring_post(r.id, null, r.next_due);
+        perform notify_finance_people(v_sal, 'Charged: ' || v_label || ' ' || fmt_money(r.amount),
+          'Recorded as an expense for ' || to_char(r.next_due, 'DD Mon YYYY'), '#/finance?tab=expenses');
+        select * into r from recurring_expenses where id = r.id;
+        g := g + 1; n := n + 1;
+      end loop;
+    elsif r.next_due <= v_today then
+      if r.reminded_due_for is distinct from r.next_due then
+        perform notify_finance_people(v_sal, case when r.next_due < v_today then 'Overdue: ' else 'Due today: ' end || v_label || ' ' || fmt_money(r.amount),
+          'Was due ' || to_char(r.next_due, 'DD Mon YYYY') || '. Mark it paid in Finance.', v_link);
+        update recurring_expenses set reminded_due_for = r.next_due where id = r.id;
+        n := n + 1;
+      end if;
+    elsif r.reminded_upcoming_for is distinct from r.next_due then
+      perform notify_finance_people(v_sal, 'Coming up: ' || v_label || ' ' || fmt_money(r.amount),
+        'Due ' || to_char(r.next_due, 'DD Mon YYYY') || ' (in ' || (r.next_due - v_today) || ' days)' || case when r.auto_post then '. Charged automatically.' else '' end, v_link);
+      update recurring_expenses set reminded_upcoming_for = r.next_due where id = r.id;
+      n := n + 1;
+    end if;
+  end loop;
+
+  -- Last month's report, once, if there is any money data at all
+  v_prev := (date_trunc('month', v_today) - interval '1 month')::date;
+  if not exists (select 1 from finance_report_log where month = v_prev)
+     and (exists (select 1 from expenses) or exists (select 1 from invoices) or exists (select 1 from investments)) then
+    insert into finance_report_log (month) values (v_prev) on conflict do nothing;
+    select coalesce(sum(amount), 0) into v_rev from invoices where status = 'paid' and paid_date >= v_prev and paid_date < (v_prev + interval '1 month')::date;
+    select coalesce(sum(amount), 0) into v_exp from expenses where spent_on >= v_prev and spent_on < (v_prev + interval '1 month')::date;
+    perform notify_finance_people(false, 'Finance report ready: ' || to_char(v_prev, 'FMMonth YYYY'),
+      'Revenue ' || fmt_money(v_rev) || ', expenses ' || fmt_money(v_exp) || ', ' || case when v_rev - v_exp >= 0 then 'profit ' else 'loss ' end || fmt_money(abs(v_rev - v_exp)),
+      '#/finance?tab=report&month=' || to_char(v_prev, 'YYYY-MM'));
+    n := n + 1;
+  end if;
+  return n;
+end $$;
+
+-- ---------- Numbers for the dashboard ----------
+create or replace function public.finance_overview() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_today date := (now() at time zone app_tz())::date; v_m date; v_sal boolean := is_manager(); r jsonb;
+        v_inv numeric; v_rev numeric; v_exp numeric; v_burn numeric;
+begin
+  if not perm('finance', 'view') then raise exception 'You don''t have access to finance'; end if;
+  v_m := date_trunc('month', v_today)::date;
+  select coalesce(sum(amount), 0) into v_inv from investments;
+  select coalesce(sum(amount), 0) into v_rev from invoices where status = 'paid';
+  select coalesce(sum(amount), 0) into v_exp from expenses;
+  select coalesce(sum(amount), 0) / 3 into v_burn from expenses where spent_on >= (v_m - interval '3 months')::date and spent_on < v_m;
+  select jsonb_build_object(
+    'currency', (select currency from app_settings where id = 1),
+    'month', to_char(v_m, 'YYYY-MM'),
+    'revenue_month', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= v_m), 0),
+    'expenses_month', coalesce((select sum(amount) from expenses where spent_on >= v_m), 0),
+    'revenue_last', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= (v_m - interval '1 month')::date and paid_date < v_m), 0),
+    'expenses_last', coalesce((select sum(amount) from expenses where spent_on >= (v_m - interval '1 month')::date and spent_on < v_m), 0),
+    'invested_total', v_inv, 'revenue_total', v_rev, 'expenses_total', v_exp, 'cash', v_inv + v_rev - v_exp,
+    'burn', round(v_burn, 2), 'runway_months', case when v_burn > 0 then round((v_inv + v_rev - v_exp) / v_burn, 1) end,
+    'outstanding', coalesce((select sum(amount) from invoices where status = 'sent'), 0),
+    'monthly_fixed', coalesce((select sum(case frequency when 'weekly' then amount * 52 / 12 when 'quarterly' then amount / 3 when 'yearly' then amount / 12 else amount end)
+                                 from recurring_expenses where active), 0),
+    'salaries_monthly', case when v_sal then coalesce((select sum(case frequency when 'weekly' then amount * 52 / 12 when 'quarterly' then amount / 3 when 'yearly' then amount / 12 else amount end)
+                                 from recurring_expenses where active and category = 'salary'), 0) end,
+    'months', (select coalesce(jsonb_agg(jsonb_build_object('month', to_char(m, 'YYYY-MM'),
+                 'revenue', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= m and paid_date < m + interval '1 month'), 0),
+                 'expenses', coalesce((select sum(amount) from expenses where spent_on >= m and spent_on < m + interval '1 month'), 0)) order by m), '[]'::jsonb)
+               from generate_series(v_m - interval '11 months', v_m, interval '1 month') m),
+    'by_category', (select coalesce(jsonb_agg(jsonb_build_object('category', category, 'total', t) order by t desc), '[]'::jsonb)
+               from (select category, sum(amount) t from expenses where spent_on >= v_m group by category) x),
+    'upcoming', (select coalesce(jsonb_agg(jsonb_build_object('id', id, 'title', case when category = 'salary' then 'Salary: ' || coalesce(member_name(payee_member), title) else title end,
+                 'category', category, 'amount', amount, 'next_due', next_due, 'auto_post', auto_post) order by next_due), '[]'::jsonb)
+               from recurring_expenses where active and next_due <= v_today + 30 and (category <> 'salary' or v_sal))
+  ) into r;
+  return r;
+end $$;
+
+-- ---------- Monthly report ----------
+create or replace function public.finance_report(p_month date) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_from date := date_trunc('month', p_month)::date; v_to date; v_prev date; v_sal boolean := is_manager(); r jsonb;
+        v_rev numeric; v_exp numeric;
+begin
+  if not perm('finance', 'view') then raise exception 'You don''t have access to finance'; end if;
+  v_to := (v_from + interval '1 month')::date; v_prev := (v_from - interval '1 month')::date;
+  select coalesce(sum(amount), 0) into v_rev from invoices where status = 'paid' and paid_date >= v_from and paid_date < v_to;
+  select coalesce(sum(amount), 0) into v_exp from expenses where spent_on >= v_from and spent_on < v_to;
+  select jsonb_build_object(
+    'month', to_char(v_from, 'YYYY-MM'), 'currency', (select currency from app_settings where id = 1), 'show_salaries', v_sal,
+    'revenue', v_rev, 'expenses', v_exp, 'net', v_rev - v_exp,
+    'salaries', coalesce((select sum(amount) from expenses where category = 'salary' and spent_on >= v_from and spent_on < v_to), 0),
+    'invoiced', coalesce((select sum(amount) from invoices where status in ('sent', 'paid') and issue_date >= v_from and issue_date < v_to), 0),
+    'investments', coalesce((select sum(amount) from investments where invested_on >= v_from and invested_on < v_to), 0),
+    'cash_end', coalesce((select sum(amount) from investments where invested_on < v_to), 0)
+              + coalesce((select sum(amount) from invoices where status = 'paid' and paid_date < v_to), 0)
+              - coalesce((select sum(amount) from expenses where spent_on < v_to), 0),
+    'prev', jsonb_build_object(
+      'revenue', coalesce((select sum(amount) from invoices where status = 'paid' and paid_date >= v_prev and paid_date < v_from), 0),
+      'expenses', coalesce((select sum(amount) from expenses where spent_on >= v_prev and spent_on < v_from), 0)),
+    'by_category', (select coalesce(jsonb_agg(jsonb_build_object('category', category, 'total', t, 'count', c) order by t desc), '[]'::jsonb)
+               from (select category, sum(amount) t, count(*) c from expenses where spent_on >= v_from and spent_on < v_to group by category) x),
+    'expense_rows', (select coalesce(jsonb_agg(jsonb_build_object('title', case when category = 'salary' and not v_sal then 'Salaries' else title end,
+                 'category', category, 'amount', amount, 'spent_on', spent_on, 'vendor', vendor,
+                 'payee', case when v_sal then member_name(payee_member) end) order by spent_on, id), '[]'::jsonb)
+               from expenses where spent_on >= v_from and spent_on < v_to),
+    'revenue_rows', (select coalesce(jsonb_agg(jsonb_build_object('client', c.name, 'invoice', coalesce(i.invoice_number, '#' || i.id), 'amount', i.amount, 'paid_date', i.paid_date) order by i.paid_date), '[]'::jsonb)
+               from invoices i left join clients c on c.id = i.client_id where i.status = 'paid' and i.paid_date >= v_from and i.paid_date < v_to),
+    'investment_rows', (select coalesce(jsonb_agg(jsonb_build_object('source', source, 'kind', kind, 'amount', amount, 'invested_on', invested_on) order by invested_on), '[]'::jsonb)
+               from investments where invested_on >= v_from and invested_on < v_to)
+  ) into r;
+  return r;
+end $$;
+
+-- ---------- RLS ----------
+alter table public.expenses           enable row level security;
+alter table public.recurring_expenses enable row level security;
+alter table public.investments        enable row level security;
+alter table public.finance_report_log enable row level security;
+
+do $$ declare t text; begin
+  foreach t in array array['expenses', 'recurring_expenses'] loop
+    execute format('drop policy if exists %I on public.%I', t || '_read', t);
+    execute format('create policy %I on public.%I for select to authenticated using (public.can_money(category, ''view''))', t || '_read', t);
+    execute format('drop policy if exists %I on public.%I', t || '_insert', t);
+    execute format('create policy %I on public.%I for insert to authenticated with check (public.can_money(category, ''edit''))', t || '_insert', t);
+    execute format('drop policy if exists %I on public.%I', t || '_update', t);
+    execute format('create policy %I on public.%I for update to authenticated using (public.can_money(category, ''edit'')) with check (public.can_money(category, ''edit''))', t || '_update', t);
+    execute format('drop policy if exists %I on public.%I', t || '_delete', t);
+    execute format('create policy %I on public.%I for delete to authenticated using (public.can_money(category, ''delete''))', t || '_delete', t);
+  end loop;
+end $$;
+drop policy if exists investments_read on public.investments;
+create policy investments_read on public.investments for select to authenticated using ((select public.perm('finance', 'view')));
+drop policy if exists investments_insert on public.investments;
+create policy investments_insert on public.investments for insert to authenticated with check ((select public.perm('finance', 'edit')));
+drop policy if exists investments_update on public.investments;
+create policy investments_update on public.investments for update to authenticated using ((select public.perm('finance', 'edit'))) with check ((select public.perm('finance', 'edit')));
+drop policy if exists investments_delete on public.investments;
+create policy investments_delete on public.investments for delete to authenticated using ((select public.perm('finance', 'delete')));
+
+revoke all on public.expenses, public.recurring_expenses, public.investments, public.finance_report_log from anon, authenticated;
+grant select, insert, delete on public.expenses, public.recurring_expenses, public.investments to authenticated;
+grant update (title, category, amount, spent_on, vendor, notes, paid_by, payee_member) on public.expenses to authenticated;
+grant update (title, category, amount, frequency, next_due, vendor, payee_member, auto_post, remind_days, active, notes) on public.recurring_expenses to authenticated;
+grant update (source, investor_id, kind, amount, invested_on, notes) on public.investments to authenticated;
+grant all on public.expenses, public.recurring_expenses, public.investments, public.finance_report_log to service_role;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.notify_finance_people(boolean, text, text, text), public.money_before_write(), public.money_after_write(),
+  public.recurring_post(bigint, numeric, date) from authenticated;
+grant execute on function public.can_money(text, text), public.fmt_money(numeric), public.advance_due(date, text),
+  public.recurring_mark_paid(bigint, numeric, date), public.recurring_skip(bigint), public.finance_sweep(),
+  public.finance_overview(), public.finance_report(date) to authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).

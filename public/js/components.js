@@ -111,6 +111,12 @@ export const EVENT_LABELS = {
   invoice_created: 'Invoice added', invoice_paid: 'Invoice paid', invoice_updated: 'Invoice updated', invoice_deleted: 'Invoice deleted',
   file_uploaded: 'File uploaded', file_deleted: 'File deleted', lead_converted: 'Converted to client',
   client_agent_added: 'Agent added', client_agent_removed: 'Agent removed',
+  expense_added: 'Expense added', expense_updated: 'Expense updated', expense_deleted: 'Expense deleted',
+  recurring_added: 'Bill added', recurring_deleted: 'Bill removed', recurring_paid: 'Bill paid', recurring_skipped: 'Bill skipped',
+  investment_added: 'Investment added', investment_deleted: 'Investment deleted',
+  project_created: 'Project created', project_pm_assigned: 'PM assigned', project_status_changed: 'Project updated', project_deleted: 'Project deleted',
+  project_member_added: 'Added to project', project_member_requested: 'Approval asked', project_member_approved: 'Approved', project_member_rejected: 'Not approved',
+  project_member_cancelled: 'Request cancelled', project_member_removed: 'Removed from project', requirement_added: 'Requirement added', requirement_done: 'Requirement met',
 };
 export const EVENT_GROUPS = [
   ['Sign-ins', ['login', 'logout']],
@@ -118,11 +124,12 @@ export const EVENT_GROUPS = [
   ['Timers', ['timer_started', 'timer_paused', 'timer_resumed', 'timer_stopped']],
   ['Team', ['member_invited', 'invite_accepted', 'member_activated', 'member_deactivated', 'member_roles_changed', 'invite_resent', 'reset_link_created']],
   ['Leads & clients', ['lead_created', 'lead_status_changed', 'lead_won', 'lead_lost', 'lead_converted', 'lead_deleted', 'client_agent_added', 'client_agent_removed', 'client_created', 'client_pm_assigned', 'client_status_changed', 'client_deleted', 'file_uploaded', 'file_deleted']],
-  ['Finance', ['invoice_created', 'invoice_paid', 'invoice_updated', 'invoice_deleted']],
+  ['Projects', ['project_created', 'project_pm_assigned', 'project_status_changed', 'project_deleted', 'project_member_added', 'project_member_requested', 'project_member_approved', 'project_member_rejected', 'project_member_cancelled', 'project_member_removed', 'requirement_added', 'requirement_done']],
+  ['Finance', ['invoice_created', 'invoice_paid', 'invoice_updated', 'invoice_deleted', 'expense_added', 'expense_updated', 'expense_deleted', 'recurring_added', 'recurring_deleted', 'recurring_paid', 'recurring_skipped', 'investment_added', 'investment_deleted']],
   ['Settings', ['settings_changed', 'permission_changed', 'admin_provisioned']],
 ];
 const evClass = (a) => a.startsWith('task_') || a === 'revision_requested' ? 'task' : a.startsWith('timer_') ? 'timer'
-  : ['login', 'logout'].includes(a) ? 'signin' : /member|invite|reset_link|admin_/.test(a) ? 'member' : /^(lead|client|file)_/.test(a) ? 'task' : /^invoice_/.test(a) ? 'timer' : '';
+  : ['login', 'logout'].includes(a) ? 'signin' : /member|invite|reset_link|admin_/.test(a) ? 'member' : /^(lead|client|file)_/.test(a) ? 'task' : /^(invoice|expense|recurring|investment)_/.test(a) ? 'timer' : /^(project|requirement)_/.test(a) ? 'task' : '';
 
 export function logItem(l, { time = 'time', meId = null } = {}) {
   const whoName = l.actor_id && l.actor_id === meId ? 'You' : (l.actor_name || 'System');

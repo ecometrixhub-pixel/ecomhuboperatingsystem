@@ -78,6 +78,8 @@ async function boot() {
   if (profile.status === 'invited') state.profile.status = 'active';
 
   renderShell();
+  // Bill / salary reminders and the monthly report notice (runs once per app load, safe to repeat)
+  supabase.rpc('finance_sweep').then(() => {}, () => {});
   await refreshTimer();
   window.addEventListener('hashchange', route);
   route();

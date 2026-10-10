@@ -33,7 +33,7 @@ const inList = (arr, v) => !v || arr.includes(v);
  * opts.agents: [{id, name}] lead generators; opts.reps: [{id, name}] sales reps (internal only)
  * opts.isPublic: hides internal-only fields; opts.lead: values when editing
  */
-export function leadFormHTML({ lead = {}, agents = [], reps = [], isPublic = false, defaultAgent = '' } = {}) {
+export function leadFormHTML({ lead = {}, agents = [], reps = [], isPublic = false, defaultAgent = '', canAssign = false } = {}) {
   const l = lead;
   const country = inList(COUNTRIES, l.country) ? (l.country || '') : 'Others';
   const niche = inList(NICHES, l.industry) ? (l.industry || '') : 'Other';
@@ -61,7 +61,7 @@ export function leadFormHTML({ lead = {}, agents = [], reps = [], isPublic = fal
         ${select('lf-agent', agents.map((a) => [a.id, a.name]).concat([['__other', 'Other']]), agentVal, isPublic ? 'Select your name' : 'Select agent')}
         <input id="lf-agent-other" class="input ${agentVal === '__other' ? '' : 'hidden'}" maxlength="80" value="${e(l.agent_name || '')}" placeholder="Full name, e.g. Haseeb Gul"></div>
       ${isPublic ? '' : `
-      <div class="field"><label for="lf-rep">Sales representative</label>${select('lf-rep', reps.map((r) => [r.id, r.name]), l.assigned_to || '', 'Not assigned yet')}</div>
+      ${canAssign ? `<div class="field"><label for="lf-rep">Sales representative</label>${select('lf-rep', reps.map((r) => [r.id, r.name]), l.assigned_to || '', 'Not assigned yet')}</div>` : ''}
       <div class="field"><label for="lf-follow">Next follow-up</label><input id="lf-follow" class="input" type="date" value="${e(l.next_follow_up)}"></div>`}
       <div class="field span-2"><label for="lf-notes">Initial note / requirement details</label><textarea id="lf-notes" class="textarea" maxlength="4000" placeholder="Business, goals, challenges, ad spend…">${e(l.notes)}</textarea></div>
       ${isPublic ? '<input type="text" id="lf-hp" name="website_url" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">' : ''}
@@ -115,7 +115,7 @@ export function readLeadForm(root, { isPublic = false } = {}) {
     notes: v('#lf-notes'),
   };
   if (!isPublic) {
-    payload.assigned_to = v('#lf-rep') || null;
+    if (root.querySelector('#lf-rep')) payload.assigned_to = v('#lf-rep') || null;
     payload.next_follow_up = v('#lf-follow') || null;
   }
   if (!payload.contact_name) return { error: 'Enter the lead\'s full name.', field: '#lf-name' };

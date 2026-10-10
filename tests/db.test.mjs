@@ -327,7 +327,8 @@ ok(acts2.length === 7, 'business events logged: ' + acts2.sort().join(','));
 
 console.log('Part 3: convert flow, agents, notifications');
 const notes = async (uid) => (await q(`select title from notifications where user_id=$1 order by id`, [uid])).map((r) => r.title);
-const [l2] = await as(LG, () => q(`insert into leads (company, contact_name, assigned_to, budget, currency, priority, status) values ('Brew Co', 'Sam', $1, 800, 'GBP', 'high', 'meeting') returning id`, [SR]));
+const [l2] = await as(LG, () => q(`insert into leads (company, contact_name, budget, currency, priority, status) values ('Brew Co', 'Sam', 800, 'GBP', 'high', 'meeting') returning id`));
+await as(SR, () => q(`update leads set assigned_to=$1 where id=$2`, [SR, l2.id]));
 ok((await notes(SR)).some((t) => t.includes('Brew Co')), 'sales rep notified when a lead is assigned');
 await as(SR, async () => {
   await expectErr(() => q(`select lead_convert($1)`, [l2.id]), 'convert needs a won lead first', /won/);
@@ -475,6 +476,71 @@ await as(FN, async () => {
 });
 await as(PM1, async () => ok((await q(`select count(*)::int c from project_requirements`))[0].c === 0, 'other PM sees no requirements'));
 await expectErr(() => as(PM1, () => q(`insert into project_requirements (project_id, title) values ($1, 'x')`, [pj.id])), 'other PM cannot add requirements', /row-level/);
+
+console.log('Part 6: leads go to the Sales team');
+const [l6] = await as(LG, () => q(`insert into leads (company, contact_name) values ('Pick Me Co', 'Zoe') returning id`));
+ok((await notes(A)).includes('New lead: Pick Me Co') && (await notes(MG)).includes('New lead: Pick Me Co'), 'admin + managers notified when lead gen adds a lead');
+ok((await notes(SR)).includes('New lead to pick up: Pick Me Co'), 'sales reps told an unassigned lead came in');
+await expectErr(() => as(LG, () => q(`update leads set assigned_to=$1 where id=$2`, [SR, l6.id])), 'lead generation cannot assign leads', /Sales Representative, a manager/);
+await expectErr(() => as(LG, () => q(`insert into leads (company, assigned_to) values ('Z', $1)`, [SR])), 'lead generation cannot pre-assign on create', /Sales Representative, a manager/);
+await as(SR, () => q(`update leads set assigned_to=$1 where id=$2`, [SR, l6.id]));
+ok((await q(`select assigned_to from leads where id=$1`, [l6.id]))[0].assigned_to === SR, 'sales rep assigns a lead');
+await as(MG, () => q(`update leads set assigned_to=null where id=$1`, [l6.id]));
+ok((await q(`select assigned_to from leads where id=$1`, [l6.id]))[0].assigned_to === null, 'manager can unassign');
+
+console.log('Part 7: business finance');
+const today = (await q(`select (now() at time zone app_tz())::date::text d`))[0].d;
+const [canva] = await as(MG, () => q(`insert into recurring_expenses (title, category, amount, frequency, next_due, auto_post) values ('Canva Pro', 'tools', 15, 'monthly', current_date - 1, true) returning id`));
+await expectErr(() => as(MG, () => q(`insert into recurring_expenses (title, category, amount, next_due) values ('Salary', 'salary', 500, current_date + 2)`)), 'salary needs a team member', /team member/);
+const [sal] = await as(MG, () => q(`insert into recurring_expenses (title, category, amount, next_due, payee_member) values ('Salary', 'salary', 500, current_date + 2, $1) returning id`, [SR]));
+await expectErr(() => as(FN, () => q(`insert into recurring_expenses (title, category, amount, next_due, payee_member) values ('Salary', 'salary', 1, current_date, $1)`, [FN])), 'finance role cannot add salaries', /row-level/);
+await as(FN, async () => {
+  await q(`insert into expenses (title, category, amount) values ('Office internet', 'utilities', 40)`);
+  ok((await q(`select count(*)::int c from recurring_expenses`))[0].c === 1, 'finance role sees tools but not salaries');
+});
+await as(SR, async () => {
+  ok((await q(`select count(*)::int c from expenses`))[0].c === 0, 'sales rep sees no expenses');
+  await expectErr(() => q(`insert into expenses (title, amount) values ('x', 1)`), 'sales rep cannot add expenses', /row-level/);
+});
+ok((await notes(MG)).some((t) => t.startsWith('New expense: Office internet')), 'managers told about a new expense');
+await as(SR, () => q(`select finance_sweep()`));
+const charged = await q(`select count(*)::int c, max(period)::text p from expenses where recurring_id=$1`, [canva.id]);
+ok(charged[0].c === 1, 'auto-charged tool recorded as an expense (' + charged[0].p + ')');
+ok((await q(`select next_due > current_date as ok from recurring_expenses where id=$1`, [canva.id]))[0].ok, 'tool due date moved to next month');
+ok((await notes(A)).some((t) => t.startsWith('Charged: Canva Pro')) && (await notes(FN)).some((t) => t.startsWith('Charged: Canva Pro')), 'admin + finance told about the charge');
+ok((await notes(MG)).some((t) => t.startsWith('Coming up: Salary: ')) && !(await notes(FN)).some((t) => t.includes('Salary')), 'salary reminder to admin/managers only');
+ok((await notes(A)).some((t) => t.startsWith('Finance report ready:')), 'monthly report notice sent');
+const notesBefore = (await q(`select count(*)::int c from notifications`))[0].c;
+await as(MG, () => q(`select finance_sweep()`));
+ok((await q(`select count(*)::int c from notifications`))[0].c === notesBefore, 'running the sweep again sends nothing new');
+await expectErr(() => as(FN, () => q(`select recurring_mark_paid($1)`, [sal.id])), 'finance role cannot pay salaries', /permission|not found/i);
+await as(MG, () => q(`select recurring_mark_paid($1)`, [sal.id]));
+ok((await q(`select count(*)::int c from expenses where category='salary' and payee_member=$1`, [SR]))[0].c === 1, 'salary paid and recorded');
+await as(FN, async () => ok((await q(`select count(*)::int c from expenses where category='salary'`))[0].c === 0, 'finance role cannot read salary rows'));
+await as(MG, () => q(`insert into investments (source, investor_id, amount) values ('Taha Khan', $1, 2000)`, [MG]));
+ok((await notes(A)).some((t) => t.startsWith('New investment:')), 'admin told about a new investment');
+await as(FN, async () => {
+  const o = (await q(`select finance_overview() o`))[0].o;
+  ok(Number(o.cash) === Number(o.invested_total) + Number(o.revenue_total) - Number(o.expenses_total), 'cash = invested + revenue - expenses');
+  ok(o.salaries_monthly === null && !o.upcoming.some((u) => u.category === 'salary'), 'finance role overview hides salary details');
+  ok(o.months.length === 12, '12 months in the chart');
+  const r = (await q(`select finance_report(current_date) r`))[0].r;
+  ok(r.expense_rows.some((x) => x.category === 'salary' && x.title === 'Salaries' && x.payee === null), 'report hides who got which salary from finance role');
+  ok(Number(r.expenses) >= 555, 'report totals include salaries (' + r.expenses + ')');
+});
+await as(MG, async () => {
+  const r = (await q(`select finance_report(current_date) r`))[0].r;
+  ok(r.expense_rows.some((x) => x.category === 'salary' && x.payee), 'managers see salary details in the report');
+});
+await expectErr(() => as(SR, () => q(`select finance_overview()`)), 'sales rep cannot see the finance dashboard', /access to finance/);
+await as(MG, async () => {
+  await q(`delete from expenses where title='Office internet'`);
+  await q(`delete from investments where source='Taha Khan'`);
+  await q(`update recurring_expenses set active=false where id=$1`, [canva.id]);
+  await q(`delete from recurring_expenses where id=$1`, [canva.id]);
+  ok((await q(`select count(*)::int c from expenses where recurring_id is null and title='Office internet'`))[0].c === 0, 'expenses, investments and bills can be deleted (charged expense kept)');
+  ok((await q(`select count(*)::int c from expenses where title='Canva Pro'`))[0].c === 1, 'past tool charges stay after the bill is removed');
+});
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
