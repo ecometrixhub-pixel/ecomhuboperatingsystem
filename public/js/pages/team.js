@@ -6,7 +6,8 @@ import {
 } from '../ui.js';
 import { fmtDate, fmtDateOfIso, fmtDuration, fmtRelative, todayStr, startOfWeek } from '../time.js';
 import { invalidateMembers } from '../task-drawer.js';
-import { DEPARTMENTS, DESIGNATIONS } from '../team-config.js';
+import { DEPARTMENTS, DESIGNATIONS, FOUNDERS, FOUNDER_TITLE } from '../team-config.js';
+const isFounderTitle = (t) => /^co-founder/i.test(t || '');
 
 export async function render({ el, params }) {
   let members = [];
@@ -30,6 +31,7 @@ export async function render({ el, params }) {
         <option value="active">Active</option><option value="invited">Invited</option><option value="inactive">Inactive</option>
       </select>
     </div>
+    <div id="founders"></div>
     <section class="panel"><div class="table-wrap" id="table">${loadingBlock(5)}</div></section>`;
 
   const table = el.querySelector('#table');
@@ -75,7 +77,8 @@ export async function render({ el, params }) {
   }
 
   async function load() {
-    const [m, p] = await Promise.all([loadMembers(), rpc('team_presence')]);
+    const [m, p, everyone] = await Promise.all([loadMembers(), rpc('team_presence'), state.isOwner ? loadMembers({ includeAdmin: true }) : Promise.resolve([])]);
+    drawFounders(everyone);
     members = m;
     presence = new Map(p.map((x) => [x.user_id, x]));
     renderRoles();
@@ -97,6 +100,42 @@ export async function render({ el, params }) {
 
   const reload = async () => { invalidateMembers(); await load().catch((e) => toast(e.message, 'error')); };
 
+  // ---------- Founding team (admin only) ----------
+  const foundersBox = el.querySelector('#founders');
+  function drawFounders(everyone) {
+    if (!state.isOwner) return;
+    const missing = FOUNDERS.filter((f) => {
+      const p = everyone.find((x) => (x.email || '').toLowerCase() === f.email.toLowerCase());
+      return !p || p.job_title !== FOUNDER_TITLE || p.department !== f.department || (p.role !== 'admin' && !p.roles.includes('manager'));
+    });
+    foundersBox.innerHTML = missing.length ? `<div class="note info" style="margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span style="flex:1;min-width:220px">${icon('users', 14)} <b>Founding team:</b> ${missing.map((f) => esc(`${f.first_name} ${f.last_name}`)).join(', ')} ${missing.length === 1 ? 'isn\'t' : 'aren\'t'} set up yet. One click creates their accounts as <b>Managers</b> (Co-Founder) with their department.</span>
+      <button class="btn btn-primary btn-sm" data-setup-founders>${icon('userPlus', 14)}Set up founding team</button></div>` : '';
+  }
+  foundersBox.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-setup-founders]'); if (!b) return;
+    busy(b, async () => {
+      try {
+        const { results } = await api('/setup/founders', { method: 'POST' });
+        await reload();
+        const label = { created: 'Account created', invited: 'Invite renewed', updated: 'Updated to Manager', admin: 'Admin account (title and department set)', error: 'Failed' };
+        const modal = openModal({
+          title: 'Founding team', icon: 'users', wide: true,
+          body: `<p class="muted">Send each co-founder their link. They open it, set a password and land in EcomHub OS as a Manager. Links work once.</p>
+            <div class="list panel">${results.map((r) => `<div class="list-item" style="flex-wrap:wrap;padding:12px 16px">
+              <div class="grow" style="min-width:180px"><div class="title">${esc(r.name)} <span class="badge ${r.status === 'error' ? 'inactive' : 'active'}">${esc(label[r.status] || r.status)}</span></div>
+                <div class="meta"><span>${esc(r.email)}</span>${r.error ? `<span style="color:var(--error)">${esc(r.error)}</span>` : ''}</div></div>
+              ${r.link ? `<button class="btn btn-sm" data-copy-link="${esc(r.link)}">${icon('copy', 13)}Copy link</button>
+                <a class="btn btn-sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(`Hi ${r.name.split(' ')[0]}, your EcomHub OS account is ready. Open this link to set your password: ${r.link}`)}">${icon('send', 13)}WhatsApp</a>` : ''}
+            </div>`).join('')}</div>`,
+          foot: '<button class="btn btn-primary" data-done>Done</button>',
+        });
+        modal.querySelectorAll('[data-copy-link]').forEach((c) => c.onclick = async () => { if (await copyText(c.dataset.copyLink)) { c.innerHTML = `${icon('check', 13)}Copied`; toast('Link copied'); } });
+        modal.querySelector('[data-done]').onclick = () => modal.close();
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  });
+
   // ---------- Add / edit ----------
   function memberForm(member = null) {
     const m = member || { first_name: '', last_name: '', email: '', phone: '', job_title: '', department: '', joined_on: todayStr(), roles: [] };
@@ -116,8 +155,9 @@ export async function render({ el, params }) {
             <select id="mf-dept" class="select"><option value="">Select department</option>${DEPARTMENTS.map((d) => `<option ${m.department === d.name ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}${m.department && !DEPARTMENTS.some((d) => d.name === m.department) ? `<option selected>${esc(m.department)}</option>` : ''}</select>
             <span class="hint" id="mf-dept-hint"></span></div>
           <div class="field"><label for="mf-title">Designation</label>
+            ${isFounderTitle(m.job_title) ? `<input id="mf-title" class="input" value="${esc(m.job_title)}" disabled><span class="hint">Founding team. Not in the designation list.</span>` : `
             <select id="mf-title" class="select"><option value="">Select designation</option>${DESIGNATIONS.map((t) => `<option ${m.job_title === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__other" ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? 'selected' : ''}>Other</option></select>
-            <input id="mf-title-other" class="input ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? '' : 'hidden'}" style="margin-top:6px" maxlength="80" value="${esc(m.job_title && !DESIGNATIONS.includes(m.job_title) ? m.job_title : '')}" placeholder="Type the designation"></div>
+            <input id="mf-title-other" class="input ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? '' : 'hidden'}" style="margin-top:6px" maxlength="80" value="${esc(m.job_title && !DESIGNATIONS.includes(m.job_title) ? m.job_title : '')}" placeholder="Type the designation">`}</div>
           <div class="field span-2"><span class="label">Roles</span><span class="hint" style="margin-top:-2px">Pick one or more. Each role adds its own tab. <b>Manager</b> gives full access like the admin (except Settings and Permissions).</span>
             <div class="role-pick">${state.roles.map((r) => `
               <label><input type="checkbox" name="roles" value="${esc(r.key)}" ${m.roles.includes(r.key) ? 'checked' : ''}>
@@ -130,7 +170,7 @@ export async function render({ el, params }) {
     const showDept = () => { modal.querySelector('#mf-dept-hint').textContent = DEPARTMENTS.find((d) => d.name === deptSel.value)?.points || ''; };
     deptSel.addEventListener('change', showDept); showDept();
     const titleSel = modal.querySelector('#mf-title');
-    titleSel.addEventListener('change', () => { const o = modal.querySelector('#mf-title-other'); o.classList.toggle('hidden', titleSel.value !== '__other'); if (titleSel.value === '__other') o.focus(); });
+    titleSel.tagName === 'SELECT' && titleSel.addEventListener('change', () => { const o = modal.querySelector('#mf-title-other'); o.classList.toggle('hidden', titleSel.value !== '__other'); if (titleSel.value === '__other') o.focus(); });
     const err = modal.querySelector('#mf-err');
     const fail = (msg) => { err.textContent = msg; err.classList.remove('hidden'); };
     modal.querySelector('[data-cancel]').onclick = () => modal.close();
@@ -141,7 +181,7 @@ export async function render({ el, params }) {
         first_name: modal.querySelector('#mf-first').value.trim(),
         last_name: modal.querySelector('#mf-last').value.trim(),
         phone: modal.querySelector('#mf-phone').value.trim(),
-        job_title: modal.querySelector('#mf-title').value === '__other' ? modal.querySelector('#mf-title-other').value.trim() : modal.querySelector('#mf-title').value,
+        job_title: isFounderTitle(m.job_title) ? m.job_title : modal.querySelector('#mf-title').value === '__other' ? modal.querySelector('#mf-title-other').value.trim() : modal.querySelector('#mf-title').value,
         department: modal.querySelector('#mf-dept').value,
         joined_on: modal.querySelector('#mf-joined').value,
         roles: [...modal.querySelectorAll('input[name=roles]:checked')].map((x) => x.value),

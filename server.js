@@ -16,6 +16,14 @@ const db = configured
   ? createClient(SUPABASE_URL, SECRET_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 
+// The four co-founders (Manager role, one department each). Set up once from Team → Set up founding team.
+const FOUNDERS = [
+  { first_name: 'Maliha', last_name: 'Khan', email: 'khanmaliha99909@gmail.com', department: 'Digital Marketing & Client Accounts & Finance' },
+  { first_name: 'Haseeb', last_name: 'Gul', email: 'haseebg0012@gmail.com', department: 'Tech & Operations' },
+  { first_name: 'Taha', last_name: 'Khan', email: 'tk9715495@gmail.com', department: 'Growth & Sales (Online)' },
+  { first_name: 'Tahir', last_name: 'Khan', email: 'tk247454@gmail.com', department: 'Business Development (Field)' },
+];
+const FOUNDER_TITLE = 'Co-Founder';
 const ROLE_KEYS = ['sales_rep', 'lead_gen', 'cold_caller', 'finance', 'manager', 'project_manager'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -160,6 +168,41 @@ api.post('/members', requireAdmin, wrap(async (req, res) => {
   }
   await logEvent(req.admin, 'member_invited', user.id, `Invited ${fields.first_name} ${fields.last_name || ''}`.trim(), { email, roles });
   res.status(201).json({ id: user.id, inviteLink: invite.data.properties.action_link });
+}));
+
+// Create (or update) the co-founders' accounts in one go → invite links to share
+api.post('/setup/founders', requireAdmin, wrap(async (req, res) => {
+  if (req.admin.role !== 'admin') throw new HttpError(403, 'Only the admin can set up the founding team');
+  const redirectTo = `${siteOrigin(req)}/set-password.html`;
+  const results = [];
+  for (const f of FOUNDERS) {
+    const name = `${f.first_name} ${f.last_name}`;
+    const fields = { first_name: f.first_name, last_name: f.last_name, department: f.department, job_title: FOUNDER_TITLE };
+    try {
+      const { data: existing } = await db.from('profiles').select('id, role, status, member_roles(role_key)').eq('email', f.email).maybeSingle();
+      if (existing) {
+        // Keep their other roles, add Manager. The admin account keeps admin and just gets the title + department.
+        const roles = existing.role === 'admin' ? null : [...new Set([...(existing.member_roles || []).map((r) => r.role_key), 'manager'])];
+        const { error } = await db.rpc('admin_save_member', { p_actor: req.admin.id, p_member: existing.id, p_fields: fields, p_roles: roles });
+        if (error) throw new Error(error.message);
+        let link = null;
+        if (existing.status === 'invited') link = (await accessLink(f.email, true, redirectTo, { first_name: f.first_name, last_name: f.last_name })).link;
+        results.push({ name, email: f.email, status: existing.role === 'admin' ? 'admin' : existing.status === 'invited' ? 'invited' : 'updated', link });
+        continue;
+      }
+      const invite = await db.auth.admin.generateLink({ type: 'invite', email: f.email, options: { redirectTo, data: { first_name: f.first_name, last_name: f.last_name } } });
+      if (invite.error) throw new Error(invite.error.message);
+      const user = invite.data.user;
+      await db.from('profiles').upsert({ id: user.id, email: f.email, status: 'invited' }, { onConflict: 'id', ignoreDuplicates: true });
+      const { error } = await db.rpc('admin_save_member', { p_actor: req.admin.id, p_member: user.id, p_fields: fields, p_roles: ['manager'] });
+      if (error) { await db.auth.admin.deleteUser(user.id).catch(() => {}); throw new Error(error.message); }
+      await logEvent(req.admin, 'member_invited', user.id, `Invited ${name} (co-founder)`, { email: f.email, roles: ['manager'] });
+      results.push({ name, email: f.email, status: 'created', link: invite.data.properties.action_link });
+    } catch (e) {
+      results.push({ name, email: f.email, status: 'error', error: e.message });
+    }
+  }
+  res.json({ results });
 }));
 
 // Edit details and roles
