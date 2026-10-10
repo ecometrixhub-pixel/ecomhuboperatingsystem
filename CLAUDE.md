@@ -78,6 +78,7 @@ npm test         # runs supabase/schema.sql in an in-memory Postgres and checks 
 3. Remind the owner to paste the updated `schema.sql` into Supabase → SQL Editor → Run.
 
 ## UI conventions
+- App logo: `public/logo.png` (256px transparent, made from the owner's `ecomhuboslogo.png`, which stays out of git) is the `img.brand-mark` in the sidebar, login, set-password and lead form. Favicon `public/favicon-64.png`, iOS icon `public/apple-touch-icon.png`. The invoice logo is separate (Settings → Invoice details).
 - Light theme with the tokens at the top of `app.css` (white / `#F8FAFC` canvas, ink `#0F172A`, accent indigo `#4F46E5`, success `#16A34A`, warning `#D97706`, error `#DC2626`). Font: Geist.
 - Active time = indigo, idle = pale indigo, task timer = green, everywhere (ribbon, charts, legends).
 - Escape all user content with `esc()` before putting it in HTML.
