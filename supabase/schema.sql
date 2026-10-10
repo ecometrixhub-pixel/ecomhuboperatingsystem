@@ -3456,3 +3456,70 @@ do $$ begin
     alter table public.clients add constraint clients_address_len check (address is null or length(address) <= 300);
   end if;
 end $$;
+
+
+
+-- =====================================================================
+--  PART 12 — Attachments on expenses and bills (receipts, invoices: PDF / image)
+--  * Files live in the private Storage bucket "finance-files" at
+--    expense/<id>/<file> or bill/<id>/<file>.
+--  * expenses.attachments / recurring_expenses.attachments = list of
+--    { path, name, size, type } (up to 10). Only paths of that same row.
+--  * Who can open / upload / remove a file = who can view / edit that
+--    expense or bill (salaries: admin + managers only).
+-- =====================================================================
+alter table public.expenses add column if not exists attachments jsonb not null default '[]'::jsonb;
+alter table public.recurring_expenses add column if not exists attachments jsonb not null default '[]'::jsonb;
+grant update (attachments) on public.expenses, public.recurring_expenses to authenticated;
+
+create or replace function public.finance_attachments_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_prefix text := case when tg_table_name = 'expenses' then 'expense/' else 'bill/' end || new.id || '/'; v_item jsonb;
+begin
+  new.attachments := coalesce(new.attachments, '[]'::jsonb);
+  if jsonb_typeof(new.attachments) <> 'array' then raise exception 'Attachments are not valid'; end if;
+  if jsonb_array_length(new.attachments) > 10 then raise exception 'You can attach up to 10 files'; end if;
+  for v_item in select value from jsonb_array_elements(new.attachments) loop
+    if jsonb_typeof(v_item) <> 'object' or coalesce(v_item ->> 'path', '') not like v_prefix || '%'
+       or position('..' in v_item ->> 'path') > 0 or coalesce(trim(v_item ->> 'name'), '') = '' then
+      raise exception 'Attachments are not valid';
+    end if;
+    if coalesce(v_item ->> 'type', '') not in ('application/pdf', 'image/png', 'image/jpeg', 'image/webp') then
+      raise exception 'Attach a PDF or an image (PNG, JPG, WEBP)';
+    end if;
+  end loop;
+  return new;
+end $$;
+drop trigger if exists expenses_attachments on public.expenses;
+create trigger expenses_attachments before insert or update of attachments on public.expenses for each row execute function public.finance_attachments_check();
+drop trigger if exists recurring_attachments on public.recurring_expenses;
+create trigger recurring_attachments before insert or update of attachments on public.recurring_expenses for each row execute function public.finance_attachments_check();
+
+-- Storage access: expense/<id>/… or bill/<id>/… → same rule as the row itself
+create or replace function public.can_finance_file(p_name text, p_action text) returns boolean
+language plpgsql stable security definer set search_path = public as $$
+declare p text[] := string_to_array(coalesce(p_name, ''), '/'); v_cat text;
+begin
+  if array_length(p, 1) <> 3 or p[2] !~ '^\d{1,18}$' or p[3] = '' then return false; end if;
+  if p[1] = 'expense' then select category into v_cat from expenses where id = p[2]::bigint;
+  elsif p[1] = 'bill' then select category into v_cat from recurring_expenses where id = p[2]::bigint;
+  else return false; end if;
+  if not found then return false; end if;
+  return can_money(v_cat, p_action);
+end $$;
+revoke execute on function public.can_finance_file(text, text), public.finance_attachments_check() from public, anon;
+grant execute on function public.can_finance_file(text, text) to authenticated;
+
+do $$ begin
+  if exists (select 1 from pg_namespace where nspname = 'storage') then
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('finance-files', 'finance-files', false, 10485760, array['application/pdf', 'image/png', 'image/jpeg', 'image/webp'])
+    on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+    execute 'drop policy if exists "finance files read" on storage.objects';
+    execute 'create policy "finance files read" on storage.objects for select to authenticated using (bucket_id = ''finance-files'' and public.can_finance_file(name, ''view''))';
+    execute 'drop policy if exists "finance files upload" on storage.objects';
+    execute 'create policy "finance files upload" on storage.objects for insert to authenticated with check (bucket_id = ''finance-files'' and public.can_finance_file(name, ''edit''))';
+    execute 'drop policy if exists "finance files delete" on storage.objects';
+    execute 'create policy "finance files delete" on storage.objects for delete to authenticated using (bucket_id = ''finance-files'' and public.can_finance_file(name, ''edit''))';
+  end if;
+end $$;

@@ -3,6 +3,7 @@
 import { supabase } from '../supabase.js';
 import { state, can, money } from '../state.js';
 import { q, rpc, loadDirectory, dirName } from '../data.js';
+import { attachFieldHTML, bindAttachments, saveAttachments, removeAllAttachments, attachChip, showAttachments } from '../attachments.js';
 import { esc, icon, emptyState, loadingBlock, on, openModal, confirmDialog, toast, busy, downloadCSV } from '../ui.js';
 import { fmtDate, todayStr, daysBetween } from '../time.js';
 import { moneyFieldsHTML, bindMoneyFields, fmtCur, fmtPaid, baseCurrency, fetchRate } from '../currency.js';
@@ -127,7 +128,7 @@ export async function render({ el, params }) {
       <section class="panel"><div class="table-wrap">${list.length ? `<table class="table">
         <thead><tr><th>Expense</th><th>Category</th><th>Date</th><th>Paid by</th><th class="r">Amount</th><th></th></tr></thead>
         <tbody>${list.map((x) => `<tr>
-          <td><div style="font-weight:500">${esc(x.category === 'salary' ? `Salary: ${dirName(dir, x.payee_member) || x.title}` : x.title)}</div><div class="small muted">${esc([x.vendor, x.notes].filter(Boolean).join(' · '))}${x.recurring_id ? ' <span class="chip">Recurring</span>' : ''}</div></td>
+          <td><div style="font-weight:500">${esc(x.category === 'salary' ? `Salary: ${dirName(dir, x.payee_member) || x.title}` : x.title)}${attachChip(x, `e${x.id}`)}</div><div class="small muted">${esc([x.vendor, x.notes].filter(Boolean).join(' · '))}${x.recurring_id ? ' <span class="chip">Recurring</span>' : ''}</div></td>
           <td><span class="cat-tag"><i style="background:${CAT_COLOR[x.category] || '#94A3B8'}"></i>${esc(catName(x.category))}</span></td>
           <td class="small">${esc(fmtDate(x.spent_on))}</td>
           <td class="small">${esc(dirName(dir, x.paid_by) || '—')}</td>
@@ -142,10 +143,11 @@ export async function render({ el, params }) {
     body.querySelector('[data-exp-csv]').onclick = () => downloadCSV(`expenses-${expMonth}.csv`, [['Date', 'Expense', 'Category', 'Vendor', 'Paid by', 'For', 'Currency', 'Amount paid', 'Rate', `Amount (${baseCurrency()})`, 'Notes'],
       ...list.map((x) => [x.spent_on, x.title, catName(x.category), x.vendor || '', dirName(dir, x.paid_by), dirName(dir, x.payee_member), x.currency || baseCurrency(), x.amount_original ?? x.amount, x.fx_rate ?? 1, x.amount, x.notes])]);
     body.querySelectorAll('[data-edit-exp]').forEach((b) => b.onclick = () => expenseForm(rows.find((x) => x.id === Number(b.dataset.editExp))));
+    body.querySelectorAll('[data-attach]').forEach((b) => b.onclick = () => { const x = rows.find((r) => `e${r.id}` === b.dataset.attach); if (x) showAttachments(x, x.title); });
     body.querySelectorAll('[data-del-exp]').forEach((b) => b.onclick = async () => {
       const x = rows.find((r) => r.id === Number(b.dataset.delExp));
       if (!await confirmDialog({ title: `Delete ${x.title}?`, text: `${money(x.amount)} on ${fmtDate(x.spent_on)}`, confirm: 'Delete', danger: true })) return;
-      try { await q(supabase.from('expenses').delete().eq('id', x.id)); toast('Expense deleted'); changed(); } catch (e) { toast(e.message, 'error'); }
+      try { await removeAllAttachments(x); await q(supabase.from('expenses').delete().eq('id', x.id)); toast('Expense deleted'); changed(); } catch (e) { toast(e.message, 'error'); }
     });
   }
 
@@ -168,7 +170,7 @@ export async function render({ el, params }) {
         : r.active ? `<span class="due ${d < 0 ? 'over' : d <= r.remind_days ? 'soon' : ''}">Renews ${esc(fmtDate(r.next_due))} · ${left}</span>` : '';
       return `<div class="list-item bill ${r.active || once ? '' : 'off'}" style="flex-wrap:wrap">
         <span class="cat-dot" style="background:${CAT_COLOR[r.category] || '#94A3B8'}"></span>
-        <div class="grow" style="min-width:180px"><div class="title">${esc(name)}${r.active ? '' : once ? ' <span class="badge paid">Paid</span>' : ' <span class="badge paused">Paused</span>'}</div>
+        <div class="grow" style="min-width:180px"><div class="title">${esc(name)}${attachChip(r, `b${r.id}`)}${r.active ? '' : once ? ' <span class="badge paid">Paid</span>' : ' <span class="badge paused">Paused</span>'}</div>
           <div class="meta"><span>${fmtPaid(r, money)} ${esc(FREQ[r.frequency].toLowerCase())}</span>${r.vendor ? `<span>${esc(r.vendor)}</span>` : ''}${when}
             ${r.active ? `<span>${r.auto_post ? 'Charged automatically' : `Reminder ${r.remind_days} day${r.remind_days === 1 ? '' : 's'} before`}</span>` : ''}</div></div>
         ${edit && r.active ? `<button class="btn btn-sm" data-pay="${r.id}">${icon('check', 13)}${r.category === 'salary' ? 'Mark paid' : 'Paid'}</button>${once ? '' : `<button class="btn btn-sm btn-ghost" data-skip="${r.id}" title="Skip this one">Skip</button>`}` : ''}
@@ -183,6 +185,7 @@ export async function render({ el, params }) {
           ${edit ? `<button class="btn btn-sm" data-add="${title === 'Salaries' ? 'salary' : title.startsWith('Tools') ? 'bill' : 'other-bill'}">${icon('plus', 13)}Add</button>` : ''}</div>
           <div class="list">${list.length ? list.map(row).join('') : `<div class="panel-body"><p class="muted small">${title === 'Salaries' ? 'Add each team member\'s monthly salary to get a reminder on payday.' : 'None yet.'}</p></div>`}</div></section>`).join('')}`;
     body.querySelectorAll('[data-edit-bill]').forEach((b) => b.onclick = () => billForm({ bill: rows.find((r) => r.id === Number(b.dataset.editBill)) }));
+    body.querySelectorAll('[data-attach]').forEach((b) => b.onclick = () => { const r = rows.find((x) => `b${x.id}` === b.dataset.attach); if (r) showAttachments(r, r.title); });
     body.querySelectorAll('[data-skip]').forEach((b) => b.onclick = async () => {
       const r = rows.find((x) => x.id === Number(b.dataset.skip));
       if (!await confirmDialog({ title: `Skip the payment due ${fmtDate(r.next_due)}?`, text: 'No expense is recorded and the next due date moves on.', confirm: 'Skip' })) return;
@@ -191,7 +194,7 @@ export async function render({ el, params }) {
     body.querySelectorAll('[data-del-bill]').forEach((b) => b.onclick = async () => {
       const r = rows.find((x) => x.id === Number(b.dataset.delBill));
       if (!await confirmDialog({ title: `Remove ${r.category === 'salary' ? 'this salary' : r.title}?`, text: 'Past payments stay in Expenses. To stop it for a while, edit it and turn it off instead.', confirm: 'Remove', danger: true })) return;
-      try { await q(supabase.from('recurring_expenses').delete().eq('id', r.id)); toast('Removed'); changed(); } catch (e) { toast(e.message, 'error'); }
+      try { await removeAllAttachments(r); await q(supabase.from('recurring_expenses').delete().eq('id', r.id)); toast('Removed'); changed(); } catch (e) { toast(e.message, 'error'); }
     });
     bindPay(rows);
   }
@@ -358,10 +361,12 @@ export async function render({ el, params }) {
         <div class="field xf-salary ${e0.category === 'salary' ? '' : 'hidden'}"><label for="xf-payee">Salary for</label><select id="xf-payee" class="select"><option value="">Choose a member</option>${membersOptions(e0.payee_member)}</select></div>
         <div class="field"><label for="xf-paidby">Paid by</label><select id="xf-paidby" class="select"><option value="">Business account</option>${membersOptions(e0.paid_by, { managersOnly: true })}</select><span class="hint">Pick a co-founder if they paid from their own pocket.</span></div>
         <div class="field span-2"><label for="xf-notes">Notes</label><textarea id="xf-notes" class="textarea" rows="2">${esc(e0.notes || '')}</textarea></div>
+        ${attachFieldHTML('xf')}
         <div class="form-error hidden span-2" id="xf-err"></div></form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${x ? 'Save' : 'Add expense'}</button>`,
     });
     const xm = bindMoneyFields(m, { id: 'xf', money });
+    const xa = bindAttachments(m, 'xf', x?.attachments);
     const cat = m.querySelector('#xf-cat');
     cat.onchange = () => m.querySelector('.xf-salary').classList.toggle('hidden', cat.value !== 'salary');
     m.querySelector('[data-cancel]').onclick = () => m.close();
@@ -376,7 +381,9 @@ export async function render({ el, params }) {
       if (!p.title) return fail('Write what the expense was for.');
       if (mv.error) return fail(mv.error);
       try {
-        if (x) await q(supabase.from('expenses').update(p).eq('id', x.id)); else await q(supabase.from('expenses').insert(p));
+        const id = x ? x.id : (await q(supabase.from('expenses').insert(p).select('id').single())).id;
+        if (x) await q(supabase.from('expenses').update(p).eq('id', x.id));
+        await saveAttachments('expense', id, xa);
         toast(x ? 'Expense saved' : 'Expense added'); m.close(); changed();
       } catch (e) { fail(e.message); }
     });
@@ -406,11 +413,13 @@ export async function render({ el, params }) {
         <label class="check span-2"><input type="checkbox" id="bf-auto" ${b0.auto_post ? 'checked' : ''}> <span><b>Charged automatically</b> (card subscription). It's added as an expense on the renewal date. Leave off to get a reminder and press Mark paid yourself.</span></label>
         ${bill && bill.frequency !== 'once' ? `<label class="check span-2"><input type="checkbox" id="bf-active" ${b0.active ? 'checked' : ''}> <span><b>Active</b>. Turn off to pause reminders and charges.</span></label>` : ''}
         <div class="field span-2"><label for="bf-notes">Notes</label><textarea id="bf-notes" class="textarea" rows="2">${esc(b0.notes || '')}</textarea></div>
+        ${attachFieldHTML('bf')}
         <div class="form-error hidden span-2" id="bf-err"></div></form>`,
       foot: `<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>${bill ? 'Save' : 'Add'}</button>`,
     });
     m.querySelector('[data-cancel]').onclick = () => m.close();
     const bm = bindMoneyFields(m, { id: 'bf', money });
+    const ba = bindAttachments(m, 'bf', bill?.attachments);
     const err = m.querySelector('#bf-err');
     const freq = m.querySelector('#bf-freq'); const date = m.querySelector('#bf-date'); const unpaid = m.querySelector('#bf-unpaid'); const box = m.querySelector('#bf-renew');
     let touched = !bill;
@@ -463,6 +472,7 @@ export async function render({ el, params }) {
         let id = bill?.id;
         if (bill) await q(supabase.from('recurring_expenses').update(p).eq('id', bill.id));
         else id = (await q(supabase.from('recurring_expenses').insert(p).select('id').single())).id;
+        await saveAttachments('bill', id, ba);
         // A new bill that's already paid: record that payment as an expense on the paid date
         if (!bill && pl.paid) {
           await q(supabase.from('expenses').insert({ title: p.title, category: p.category, currency: p.currency, amount_original: p.amount_original, fx_rate: p.fx_rate, amount: p.amount,
@@ -485,10 +495,12 @@ export async function render({ el, params }) {
         <div class="field"><label for="pf-date">Paid on</label><input id="pf-date" class="input" type="date" value="${esc(todayStr())}"></div>
         ${cur !== base ? `<div class="field span-2"><label for="pf-rate">Exchange rate</label><div class="fx-line"><span>1 <b>${esc(cur)}</b> =</span><input id="pf-rate" class="input" type="number" min="0" step="any" value="${esc(r.fx_rate || '')}" style="max-width:160px"><span>${esc(base)}</span><span class="fx-eq" id="pf-eq"></span></div>
           <span class="hint" id="pf-hint">Last rate used for this bill. Change it to the rate you actually paid.</span></div>` : ''}
+        ${attachFieldHTML('pf')}
         <p class="small muted span-2">This records an expense for the payment due ${esc(fmtDate(r.next_due))}, ${r.frequency === 'once' ? 'and the bill is closed (one-time).' : `and it renews on ${esc(fmtDate(addFreq(r.next_due, r.frequency)))}.`}</p></form>`,
       foot: '<button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-save>Mark paid</button>',
     });
     const amt = m.querySelector('#pf-amount'); const rate = m.querySelector('#pf-rate');
+    const pa = bindAttachments(m, 'pf', []);
     const eq = () => { const e = m.querySelector('#pf-eq'); if (e) e.textContent = Number(rate.value) > 0 && amt.value !== '' ? `≈ ${money(Number(amt.value) * Number(rate.value))}` : ''; };
     if (rate) {
       amt.oninput = eq; rate.oninput = eq; eq();
@@ -499,7 +511,11 @@ export async function render({ el, params }) {
       const a = Number(amt.value);
       if (amt.value === '' || !(a >= 0)) return toast('Enter the amount', 'error');
       if (rate && !(Number(rate.value) > 0)) return toast('Add the exchange rate', 'error');
-      try { await rpc('recurring_mark_paid', { p_id: r.id, p_amount: a, p_paid_on: m.querySelector('#pf-date').value || null, p_fx_rate: rate ? Number(rate.value) : null }); toast('Payment recorded'); m.close(); changed(); }
+      try {
+        const expId = await rpc('recurring_mark_paid', { p_id: r.id, p_amount: a, p_paid_on: m.querySelector('#pf-date').value || null, p_fx_rate: rate ? Number(rate.value) : null });
+        if (expId && pa.changed) await saveAttachments('expense', expId, pa);
+        toast('Payment recorded'); m.close(); changed();
+      }
       catch (e) { toast(e.message, 'error'); }
     });
   }

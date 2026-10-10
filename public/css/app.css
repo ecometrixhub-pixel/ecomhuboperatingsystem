@@ -957,3 +957,19 @@ input[type="date"] { cursor: pointer; }
 }
 .inv-modal .modal-foot { flex-wrap: wrap; }
 .inv-frame { overflow-x: auto; }
+
+/* ---------- Attachments (finance) ---------- */
+.attach-box { display: grid; gap: 8px; }
+.attach-list { display: grid; gap: 6px; }
+.attach-list:empty { display: none; }
+.attach-item { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; min-width: 0; }
+.attach-item .grow { flex: 1; min-width: 0; }
+.attach-item b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-item small { color: var(--muted); font-size: 12px; }
+.attach-ico { width: 28px; height: 28px; border-radius: 8px; background: var(--accent-bg, #EEF2FF); color: var(--accent, #4F46E5); display: grid; place-items: center; flex: none; }
+.attach-drop { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1.5px dashed var(--line-2); border-radius: 10px; cursor: pointer; color: var(--muted); background: #F8FAFC; }
+.attach-drop:hover { border-color: var(--accent, #4F46E5); color: var(--accent, #4F46E5); }
+.attach-drop b { display: block; color: var(--ink, #0F172A); font-weight: 500; font-size: 13px; }
+.attach-drop small { display: block; font-size: 12px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 11.5px; cursor: pointer; vertical-align: middle; }
+.attach-chip:hover { color: var(--accent, #4F46E5); border-color: var(--accent, #4F46E5); }
