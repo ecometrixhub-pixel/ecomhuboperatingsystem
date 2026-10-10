@@ -215,6 +215,10 @@ async function route() {
   let item = nav.find((n) => n.route === path);
   let arg = null;
 
+  if (!item && /^project\/\d+$/.test(path) && nav.some((n) => n.route === 'projects')) {
+    arg = path.slice(8);
+    item = { route: 'projects', page: 'project', label: 'Project' };
+  }
   if (!item && !state.isOwner && path.startsWith('role/')) {
     arg = path.slice(5);
     if (state.myRoles.includes(arg)) item = { route: path, page: 'my-tasks', label: state.roles.find((r) => r.key === arg)?.name };

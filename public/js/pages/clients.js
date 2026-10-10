@@ -240,7 +240,7 @@ export function openClientDrawer(id, tab = 'overview') {
         <div class="note info">Each project has its own project manager and team. The project manager sees only their project: its tasks, files and invoices.</div>
         <div class="section-title">Projects for this client <span>${can('projects', 'edit') ? `<button class="btn btn-sm btn-primary" data-new-project>${icon('plus', 13)}Create project</button>` : ''}</span></div>
         ${projects.length ? `<div class="panel"><div class="list">${projects.map((x) => `
-          <a class="list-item" href="#/projects?open=${x.id}"><div class="grow"><div class="title">${esc(x.name)}</div>
+          <a class="list-item" href="#/project/${x.id}"><div class="grow"><div class="title">${esc(x.name)}</div>
             <div class="meta"><span>PM: ${esc(dirName(dir, x.project_manager) || 'not assigned')}</span>${x.due_date ? `<span>Due ${esc(fmtDate(x.due_date))}</span>` : ''}</div></div>${projectBadge(x.status)}</a>`).join('')}</div></div>`
           : emptyState('No projects yet', can('projects', 'edit') ? 'Create a project, pick its project manager, then add the team.' : '')}`;
     } else if (tab === 'tasks') {

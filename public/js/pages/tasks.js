@@ -16,7 +16,7 @@ export async function render({ el, params }) {
 
   el.innerHTML = `
     <div class="page-head">
-      <div><h1>Tasks</h1><p>Create work, assign it by role, and review what comes back.</p></div>
+      <div><h1>Tasks</h1><p>Create work, assign it by role, and review what comes back. Project tasks live inside each project.</p></div>
       <div class="actions">
         <div class="seg" role="group" aria-label="View">
           <button data-view="board" aria-pressed="${view === 'board'}">${icon('board', 14)} Board</button>
@@ -97,7 +97,7 @@ export async function render({ el, params }) {
 
   async function load() {
     const [t, m, tt] = await Promise.all([
-      q(supabase.from('tasks').select(TASK_FIELDS).order('created_at', { ascending: false }).limit(2000)),
+      q(supabase.from('tasks').select(TASK_FIELDS).is('project_id', null).order('created_at', { ascending: false }).limit(2000)),
       members.length ? Promise.resolve(members) : loadMembers(),
       q(supabase.from('task_time_totals').select('task_id, total_seconds, running')),
     ]);

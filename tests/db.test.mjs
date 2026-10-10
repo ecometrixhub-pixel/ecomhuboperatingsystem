@@ -454,5 +454,27 @@ ok((await q(`select count(*)::int c from tasks where client_id=$1 and project_id
 await ex(schema);
 ok((await q(`select count(*)::int c from projects where client_id=$1`, [c2]))[0].c === 1, 'move runs once (re-run is safe)');
 
+console.log('Part 5: leads to sales reps, project website, requirements');
+await expectErr(() => as(MG, () => q(`insert into leads (company, assigned_to) values ('X Co', $1)`, [LG])), 'leads only go to Sales Representatives', /Sales Representative/);
+await as(MG, async () => {
+  const [l] = await q(`insert into leads (company, assigned_to) values ('Y Co', $1) returning assigned_to`, [SR]);
+  ok(l.assigned_to === SR, 'lead assigned to a sales rep');
+});
+await as(PM2, async () => {
+  const [r] = await q(`update projects set website_url='https://nova.store', socials='{"instagram":"https://instagram.com/nova"}' where id=$1 returning website_url, socials`, [pj.id]);
+  ok(r.website_url === 'https://nova.store' && r.socials.instagram, 'PM saves website + socials');
+  const [req] = await q(`insert into project_requirements (project_id, title) values ($1, 'Homepage hero with offer') returning id, created_by`, [pj.id]);
+  ok(req.created_by === PM2, 'PM adds a requirement');
+  const [d] = await q(`update project_requirements set is_done=true where id=$1 returning done_by, done_at`, [req.id]);
+  ok(d.done_by === PM2 && d.done_at, 'requirement done with who + when');
+  globalThis.REQ = req.id;
+});
+await as(FN, async () => {
+  ok((await q(`select count(*)::int c from project_requirements where project_id=$1`, [pj.id]))[0].c === 1, 'project member reads requirements');
+  ok((await q(`update project_requirements set title='x' where id=$1 returning id`, [REQ])).length === 0, 'project member cannot edit requirements');
+});
+await as(PM1, async () => ok((await q(`select count(*)::int c from project_requirements`))[0].c === 0, 'other PM sees no requirements'));
+await expectErr(() => as(PM1, () => q(`insert into project_requirements (project_id, title) values ($1, 'x')`, [pj.id])), 'other PM cannot add requirements', /row-level/);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

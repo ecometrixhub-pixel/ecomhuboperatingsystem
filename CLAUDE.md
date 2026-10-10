@@ -12,6 +12,9 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 - Leads pipeline: new → contacted → qualified → meeting → proposal → negotiation → won/lost. A won lead is converted with `lead_convert()` (sets `client_id`); "Converted to client" is a filter, not a stage. Lead form fields + options live in `public/js/lead-options.js`, shared with the public form `public/lead-form.html` (no login, posts to `POST /api/public/lead`, agents from `GET /api/public/form` = members with the Lead Generation role, or a typed name).
 - Projects (`projects`, part 4 of schema): a client has one or more projects. Admin/manager creates a project (Client drawer → Create project) and sets `project_manager` (must have the Project Manager role). The PM sees only their projects: the client's basic details, tasks / invoices / files tagged with `project_id`.
 - Project team (`project_members`) is written only through RPCs: `project_member_request` → `project_member_decide` / `project_member_cancel` / `project_member_remove`. Approval rule: admin/manager adds → `approver='pm'` (only that project's PM approves); PM adds → `approver='manager'` (admin or any manager approves); project with no PM, or a manager who is its PM → `approver='auto'`. Rows are never deleted: status pending → approved / rejected / cancelled, approved → removed, with requested_by/at, decided_by/at, removed_by/at as the history.
+- Project workspace: `#/project/<id>` (`public/js/pages/project.js`), tabs Overview / Live view (website snapshot via WordPress mShots + optional iframe, social links from `projects.socials`) / Requirements (`project_requirements` checklist) / Tasks (board of `tasks.project_id`) / Files / Finances / Settings (details + team). Top-left button is the project switcher. Project tasks are hidden from the main Tasks page (`project_id is null`).
+- Adding to a project team: pick a designation (`PROJECT_ROLES` in `team-config.js`, matched against `profiles.job_title`), then a person who already has it. PMs can't create accounts.
+- Leads can only be assigned to members with the Sales Representative role (`leads_assign_check` trigger); the Leads table has an inline assign dropdown.
 - Legacy: `clients.project_manager` and `client_members` still work in SQL, but the UI no longer sets them; the part 4 migration moves them into a project once.
 - Notifications: `notifications` table filled only by triggers (`tasks_notify`, `leads_notify`, `clients_notify`, `finance_notify`, `files_notify`, `client_members_notify`) via `notify()` / `notify_managers()` / `notify_role()`; never notify the actor. Bell UI in `public/js/notify.js`.
 - Module access per role lives in `role_permissions` (leads / clients / finance / projects × view / edit / delete), edited on the Permissions page. SQL checks: `perm()`, `pm_perm()`, `can_client()`, `can_invoice()`, `can_project()`, `can_manage_project()`, `client_via_project()`, `can_project_invoice()`, `can_storage_file()`. Project Manager access applies only to projects where `projects.project_manager` is them. Project files are stored at `<client>/p<project>/…`.
@@ -27,7 +30,7 @@ The owner talks in **Hinglish** and prefers short, direct answers with a clear r
 ```bash
 npm install
 npm run dev      # http://localhost:3000 (needs .env, see .env.example)
-npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (161 checks)
+npm test         # runs supabase/schema.sql in an in-memory Postgres and checks RLS, timers, sessions, reports (170 checks)
 ```
 
 ## Where things live

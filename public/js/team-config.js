@@ -20,6 +20,13 @@ export const DESIGNATIONS = [
   'Social Media Manager',
   'Creatives & Posting Agent',
   'Ads Specialist',
+  'UI/UX Designer',
+  'Video Editor',
+  'Content Writer',
+  'SEO Specialist',
   'Finance Executive',
   'Intern',
 ];
+
+// Designations that do project work (shown when a project manager picks who to add)
+export const PROJECT_ROLES = DESIGNATIONS.filter((d) => !d.startsWith('Co-Founder') && !['Project Manager', 'Sales Representative', 'Lead Generation Agent', 'Outreach Agent', 'Cold Caller', 'Finance Executive'].includes(d));

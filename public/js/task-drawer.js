@@ -94,7 +94,7 @@ export function openTaskDrawer(taskId) {
         <dt>Assigned by</dt><dd>${(() => { const l = dirLabel(dirCache, task.created_by, state.roles); return l ? `<div class="who">${avatar({ first_name: l.name.split(' ')[0], last_name: l.name.split(' ')[1] || '' }, 'sm')}<div><div class="name">${esc(l.name)}</div>${l.title ? `<div class="sub">${esc(l.title)}</div>` : ''}</div></div>` : '<span class="muted">—</span>'; })()}</dd>
         <dt>Assigned to</dt><dd>${task.assignee ? `<div class="who">${avatar(task.assignee, 'sm')}<span>${esc(fullName(task.assignee))}</span></div>` : '<span class="muted">Nobody yet</span>'}</dd>
         <dt>Role</dt><dd>${task.team_role ? esc(roleName(task.team_role)) : '<span class="muted">Any role</span>'}</dd>
-        ${projectRow ? `<dt>Project</dt><dd><a href="#/projects?open=${projectRow.id}">${esc(projectRow.name)}</a></dd>` : ''}
+        ${projectRow ? `<dt>Project</dt><dd><a href="#/project/${projectRow.id}?tab=tasks">${esc(projectRow.name)}</a></dd>` : ''}
         ${clientRow ? `<dt>Client</dt><dd>${esc(clientRow.name)}</dd>` : ''}
         <dt>Due date</dt><dd>${task.due_date ? esc(fmtDate(task.due_date)) : '<span class="muted">No due date</span>'}</dd>
         ${task.start_date ? `<dt>Start date</dt><dd>${esc(fmtDate(task.start_date))}</dd>` : ''}

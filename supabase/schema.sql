@@ -2396,4 +2396,101 @@ alter table public.client_members disable trigger client_members_after_delete;
 delete from public.client_members cm where exists (select 1 from public.projects p where p.client_id = cm.client_id);
 alter table public.client_members enable trigger client_members_after_delete;
 
+
+
+-- =====================================================================
+--  PART 5 — Project workspace (website, socials, requirements) and
+--  leads assigned to Sales Representatives only
+-- =====================================================================
+
+-- ---------- Leads: only a Sales Representative can be assigned ----------
+create or replace function public.leads_assign_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.assigned_to is not null and (tg_op = 'INSERT' or new.assigned_to is distinct from old.assigned_to)
+     and not exists (select 1 from member_roles m join profiles p on p.id = m.member_id
+                      where m.member_id = new.assigned_to and m.role_key = 'sales_rep' and p.status in ('active', 'invited')) then
+    raise exception 'Leads can only be assigned to a Sales Representative';
+  end if;
+  return new;
+end $$;
+drop trigger if exists leads_assign_check on public.leads;
+create trigger leads_assign_check before insert or update on public.leads for each row execute function public.leads_assign_check();
+
+-- ---------- Projects: live website + social links ----------
+alter table public.projects add column if not exists website_url text;
+alter table public.projects add column if not exists socials jsonb not null default '{}'::jsonb;
+alter table public.projects drop constraint if exists projects_socials_check;
+alter table public.projects add constraint projects_socials_check check (jsonb_typeof(socials) = 'object');
+grant update (website_url, socials) on public.projects to authenticated;
+
+-- ---------- Requirements checklist per project ----------
+create table if not exists public.project_requirements (
+  id          bigint generated always as identity primary key,
+  project_id  bigint not null references public.projects(id) on delete cascade,
+  title       text not null check (char_length(title) between 1 and 300),
+  details     text not null default '',
+  is_done     boolean not null default false,
+  sort        int not null default 0,
+  created_by  uuid references public.profiles(id),
+  created_at  timestamptz not null default now(),
+  done_by     uuid references public.profiles(id),
+  done_at     timestamptz,
+  updated_at  timestamptz not null default now()
+);
+create index if not exists project_requirements_project_idx on public.project_requirements (project_id, sort, id);
+
+create or replace function public.requirements_before_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_by := coalesce(auth.uid(), new.created_by); new.created_at := now();
+  else
+    new.created_by := old.created_by; new.created_at := old.created_at; new.project_id := old.project_id;
+  end if;
+  new.updated_at := now();
+  if new.is_done and (tg_op = 'INSERT' or not old.is_done) then new.done_by := auth.uid(); new.done_at := now(); end if;
+  if not new.is_done then new.done_by := null; new.done_at := null; end if;
+  return new;
+end $$;
+drop trigger if exists requirements_before on public.project_requirements;
+create trigger requirements_before before insert or update on public.project_requirements for each row execute function public.requirements_before_write();
+
+create or replace function public.requirements_after_write() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_name text;
+begin
+  select name into v_name from projects where id = coalesce(new.project_id, old.project_id);
+  if tg_op = 'INSERT' then
+    perform log_event('requirement_added', 'project', new.project_id::text, 'Added requirement "' || new.title || '" to ' || coalesce(v_name, 'project'));
+  elsif tg_op = 'UPDATE' and new.is_done is distinct from old.is_done then
+    perform log_event(case when new.is_done then 'requirement_done' else 'requirement_reopened' end, 'project', new.project_id::text,
+      case when new.is_done then 'Completed requirement "' else 'Reopened requirement "' end || new.title || '"');
+  elsif tg_op = 'DELETE' then
+    perform log_event('requirement_deleted', 'project', old.project_id::text, 'Removed requirement "' || old.title || '"');
+  end if;
+  return coalesce(new, old);
+end $$;
+drop trigger if exists requirements_after on public.project_requirements;
+create trigger requirements_after after insert or update or delete on public.project_requirements for each row execute function public.requirements_after_write();
+
+alter table public.project_requirements enable row level security;
+drop policy if exists requirements_read on public.project_requirements;
+create policy requirements_read on public.project_requirements for select to authenticated using (public.can_project(project_id, 'view'));
+drop policy if exists requirements_insert on public.project_requirements;
+create policy requirements_insert on public.project_requirements for insert to authenticated with check (public.can_manage_project(project_id));
+drop policy if exists requirements_update on public.project_requirements;
+create policy requirements_update on public.project_requirements for update to authenticated
+  using (public.can_manage_project(project_id)) with check (public.can_manage_project(project_id));
+drop policy if exists requirements_delete on public.project_requirements;
+create policy requirements_delete on public.project_requirements for delete to authenticated using (public.can_manage_project(project_id));
+
+revoke all on public.project_requirements from anon, authenticated;
+grant select, insert, delete on public.project_requirements to authenticated;
+grant update (title, details, is_done, sort) on public.project_requirements to authenticated;
+grant all on public.project_requirements to service_role;
+
+revoke execute on all functions in schema public from public, anon;
+revoke execute on function public.leads_assign_check(), public.requirements_before_write(), public.requirements_after_write() from authenticated;
+
 -- Done. Next: create your admin user (see README, step 2).

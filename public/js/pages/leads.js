@@ -68,6 +68,7 @@ export async function render({ el, params }) {
       return;
     }
     if (!list.length) { table.innerHTML = emptyState('No leads match these filters'); return; }
+    const reps = dir.filter((d) => d.roles.includes('sales_rep') && d.status !== 'inactive');
     table.innerHTML = `<table class="table caps">
       <thead><tr><th>Lead / company</th><th>Service</th><th>Pipeline status</th><th>Assigned to</th><th>Budget</th><th>Contact &amp; outreach</th><th>Next follow-up</th><th class="r">Actions</th></tr></thead>
       <tbody>${list.map((l) => {
@@ -81,7 +82,9 @@ export async function render({ el, params }) {
         <td>${canEdit && !l.client_id
           ? `<select class="stage-select" data-stage="${esc(l.status)}" data-stage-for="${l.id}" aria-label="Pipeline status for ${esc(l.company)}">${Object.entries(STAGES).map(([k, v]) => `<option value="${k}" ${l.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`
           : `<select class="stage-select" data-stage="${esc(l.status)}" disabled aria-label="Pipeline status"><option>${l.client_id ? 'Converted' : esc(STAGES[l.status])}</option></select>`}</td>
-        <td>${rep ? `<div class="row" style="gap:8px"><span class="mini-av">${initial(rep)}</span><span>${esc(rep)}</span></div>` : '<span class="muted small">Unassigned</span>'}</td>
+        <td>${canEdit && !l.client_id
+          ? `<select class="assign-select ${l.assigned_to ? 'set' : ''}" data-assign-for="${l.id}" aria-label="Sales representative for ${esc(l.company)}"><option value="">Unassigned</option>${reps.map((r) => `<option value="${r.id}" ${l.assigned_to === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}${l.assigned_to && !reps.some((r) => r.id === l.assigned_to) ? `<option value="${l.assigned_to}" selected>${esc(rep || 'Former member')}</option>` : ''}</select>`
+          : rep ? `<div class="row" style="gap:8px"><span class="mini-av">${initial(rep)}</span><span>${esc(rep)}</span></div>` : '<span class="muted small">Unassigned</span>'}</td>
         <td>${l.budget !== null && l.budget !== undefined ? `<div style="font-weight:600" class="money">${esc(fmtBudget(l.budget, l.currency))}</div>` : '<div class="muted">—</div>'}<div class="small muted">${l.source ? `via ${esc(l.source)}` : ''}</div></td>
         <td><div class="outreach">
           ${l.phone ? `<a href="tel:${esc(l.phone)}" title="Call ${esc(l.phone)}" aria-label="Call">${icon('phone', 15)}</a>` : `<span title="No phone">${icon('phone', 15)}</span>`}
@@ -110,6 +113,15 @@ export async function render({ el, params }) {
   const offs = [
     on(table, 'click', '[data-new]', () => openLeadForm()),
     on(table, 'click', '[data-open]', (e, b) => openLeadDrawer(Number(b.dataset.open))),
+    on(table, 'change', '[data-assign-for]', async (e, sel) => {
+      const id = Number(sel.dataset.assignFor); const to = sel.value || null;
+      sel.disabled = true;
+      try {
+        await q(supabase.from('leads').update({ assigned_to: to }).eq('id', id));
+        toast(to ? `Assigned to ${dirName(dir, to)}. They were notified.` : 'Lead unassigned');
+        changed();
+      } catch (err) { toast(err.message, 'error'); load(); }
+    }),
     on(table, 'change', '[data-stage-for]', async (e, sel) => {
       const id = Number(sel.dataset.stageFor); const next = sel.value;
       sel.dataset.stage = next; sel.disabled = true;

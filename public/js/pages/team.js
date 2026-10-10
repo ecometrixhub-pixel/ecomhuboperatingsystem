@@ -249,7 +249,7 @@ export async function render({ el, params }) {
       try {
         const pm = await import('./projects.js');
         box.innerHTML = await pm.memberProjectsHtml(id);
-        box.querySelector('[data-add-project]').onclick = () => pm.openAddToProject({ memberId: id, memberName: fullName(m) });
+        box.querySelector('[data-add-project]').onclick = () => pm.openAddToProject({ memberId: id, memberName: fullName(m), memberTitle: m.job_title || '' });
       } catch (e) { box.innerHTML = `<p class="small muted">${esc(e.message)}</p>`; }
     };
     if (box) {
