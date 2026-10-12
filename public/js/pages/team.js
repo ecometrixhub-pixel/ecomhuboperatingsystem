@@ -160,7 +160,7 @@ export async function render({ el, params }) {
             ${isFounderTitle(m.job_title) ? `<input id="mf-title" class="input" value="${esc(m.job_title)}" disabled><span class="hint">Founding team. Not in the designation list.</span>` : `
             <select id="mf-title" class="select"><option value="">Select designation</option>${DESIGNATIONS.map((t) => `<option ${m.job_title === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__other" ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? 'selected' : ''}>Other</option></select>
             <input id="mf-title-other" class="input ${m.job_title && !DESIGNATIONS.includes(m.job_title) ? '' : 'hidden'}" style="margin-top:6px" maxlength="80" value="${esc(m.job_title && !DESIGNATIONS.includes(m.job_title) ? m.job_title : '')}" placeholder="Type the designation">`}</div>
-          <div class="field span-2"><span class="label">Roles</span><span class="hint" style="margin-top:-2px">Pick one or more. Each role adds its own tab. <b>Manager</b> gives full access like the admin (except Settings and Permissions).</span>
+          <div class="field span-2"><span class="label">Roles</span><span class="hint" style="margin-top:-2px">Optional. Leave empty for designers, developers, editors and other project agents — they get My tasks, the timer and the projects they're added to. Each role adds its own tab. <b>Manager</b> gives full access like the admin (except Settings and Permissions).</span>
             <div class="role-pick">${state.roles.map((r) => `
               <label><input type="checkbox" name="roles" value="${esc(r.key)}" ${m.roles.includes(r.key) ? 'checked' : ''}>
                 <div><b><span class="role-dot" data-role="${esc(r.key)}" style="display:inline-block;margin-right:6px"></span>${esc(r.name)}</b><span>${esc(r.description)}</span></div></label>`).join('')}</div></div>
@@ -189,7 +189,6 @@ export async function render({ el, params }) {
         roles: [...modal.querySelectorAll('input[name=roles]:checked')].map((x) => x.value),
       };
       if (!body.first_name) return fail('Enter a first name.');
-      if (!body.roles.length) return fail('Pick at least one role.');
       try {
         if (member) {
           await api(`/members/${member.id}`, { method: 'PATCH', body });

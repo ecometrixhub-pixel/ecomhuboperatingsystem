@@ -215,9 +215,16 @@ export function openTaskDrawer(taskId) {
       }
       if (act === 'edit') { openTaskForm({ task, clientName: clientRow?.name || '', projectName: projectRow?.name || '', onSaved: () => { changed(); load(); } }); return; }
       if (act === 'delete') {
-        const ok = await confirmDialog({ title: 'Delete this task?', text: `"${task.title}" and its comments will be removed. Tasks with tracked time can't be deleted.`, confirm: 'Delete task', danger: true });
-        if (!ok) return;
-        await q(supabase.from('tasks').delete().eq('id', task.id));
+        if (state.isAdmin) {
+          // Admin / manager: force delete — works even when time was tracked (recorded in the activity log)
+          const ok = await confirmDialog({ title: 'Delete this task for good?', text: `"${task.title}", its comments and all its tracked time will be removed. This can't be undone. A note stays in the activity log.`, confirm: 'Delete task', danger: true });
+          if (!ok) return;
+          await rpc('task_force_delete', { p_task: task.id });
+        } else {
+          const ok = await confirmDialog({ title: 'Delete this task?', text: `"${task.title}" and its comments will be removed. Tasks with tracked time can't be deleted.`, confirm: 'Delete task', danger: true });
+          if (!ok) return;
+          await q(supabase.from('tasks').delete().eq('id', task.id));
+        }
         toast('Task deleted');
         closeDrawer(); changed(); return;
       }

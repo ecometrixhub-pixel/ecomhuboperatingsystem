@@ -151,7 +151,6 @@ api.post('/members', requireAdmin, wrap(async (req, res) => {
   const fields = memberFields(req.body);
   if (!fields.first_name) throw new HttpError(400, 'First name is required');
   const roles = parseRoles(req.body.roles) || [];
-  if (!roles.length) throw new HttpError(400, 'Pick at least one role');
 
   const { data: existing } = await db.from('profiles').select('id').eq('email', email).maybeSingle();
   if (existing) throw new HttpError(409, 'A member with this email already exists');
@@ -218,7 +217,6 @@ api.patch('/members/:id', requireAdmin, wrap(async (req, res) => {
   const roles = parseRoles(req.body.roles);
   const { data: target } = await db.from('profiles').select('id, role').eq('id', req.params.id).maybeSingle();
   if (!target) throw new HttpError(404, 'Member not found');
-  if (roles && !roles.length && target.role !== 'admin') throw new HttpError(400, 'Pick at least one role');
   const { error } = await db.rpc('admin_save_member', { p_actor: req.admin.id, p_member: target.id, p_fields: fields, p_roles: roles });
   if (error) throw new HttpError(400, error.message);
   res.json({ ok: true });

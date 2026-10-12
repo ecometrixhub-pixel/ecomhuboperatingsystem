@@ -625,5 +625,58 @@ console.log('Part 10: invoices v2 (BUID, auto numbers, items, business invoices)
   await as(MG, async () => { const r = (await q(`select finance_report(current_date) r`))[0].r; ok(Array.isArray(r.revenue_rows), 'monthly report still works'); });
 }
 
+console.log('Part 11: invoice template fields');
+{
+  const [c] = await as(MG, () => q(`insert into clients (name, address, country) values ('Template Co', '12 High St, London', 'UK') returning id, address`));
+  ok(c.address === '12 High St, London', 'client address saved');
+  await as(FN, async () => {
+    const [i] = await q(`insert into invoices (client_id, billing_period, items) values ($1, '1–31 October 2026', '[{"description":"Paid ads","qty":1,"rate":400}]') returning billing_period, invoice_number, issued_by_name`, [c.id]);
+    ok(i.billing_period === '1–31 October 2026' && /^INV-BUID-TC\d{3}$/.test(i.invoice_number), 'billing period stored, number auto (' + i.invoice_number + ')');
+    await expectErr(() => q(`insert into invoices (client_id, billing_period, amount) values ($1, $2, 5)`, [c.id, 'x'.repeat(81)]), 'billing period length limit', /billing_period/);
+  });
+  await as(SR, async () => ok((await q(`select count(*)::int c from invoices where billing_period <> ''`))[0].c === 0, 'sales rep still can\'t see invoices'));
+}
+
+console.log('Part 12: attachments on expenses and bills');
+{
+  const pdf = (pfx, n = 'receipt.pdf') => JSON.stringify([{ path: `${pfx}/abc-${n}`, name: n, size: 1200, type: 'application/pdf' }]);
+  await as(FN, async () => {
+    const [e] = await q(`insert into expenses (title, category, amount) values ('Figma', 'tools', 15) returning id`);
+    await q(`update expenses set attachments = $2 where id = $1`, [e.id, pdf(`expense/${e.id}`)]);
+    const [r] = await q(`select attachments from expenses where id = $1`, [e.id]);
+    ok(r.attachments.length === 1 && r.attachments[0].name === 'receipt.pdf', 'finance can attach a receipt to an expense');
+    await expectErr(() => q(`update expenses set attachments = $2 where id = $1`, [e.id, pdf('expense/999999')]), 'attachment must belong to the same expense', /not valid/);
+    await expectErr(() => q(`update expenses set attachments = $2 where id = $1`, [e.id, JSON.stringify([{ path: `expense/${e.id}/x.exe`, name: 'x.exe', type: 'application/x-msdownload' }])]), 'only PDF or images', /PDF or an image/);
+    await expectErr(() => q(`update expenses set attachments = $2 where id = $1`, [e.id, JSON.stringify(Array.from({ length: 11 }, (_, k) => ({ path: `expense/${e.id}/${k}.pdf`, name: `${k}.pdf`, type: 'application/pdf' })))]), 'up to 10 files', /up to 10/);
+    ok((await q(`select can_finance_file($1, 'view') v, can_finance_file($1, 'edit') e`, [`expense/${e.id}/abc-receipt.pdf`]))[0].e, 'finance can upload to their expense folder');
+    ok(!(await q(`select can_finance_file('expense/999999/a.pdf', 'view') v`))[0].v, 'no access to a folder of a missing expense');
+    ok(!(await q(`select can_finance_file('other/1/a.pdf', 'view') v`))[0].v && !(await q(`select can_finance_file($1, 'view') v`, [`expense/${e.id}`]))[0].v, 'odd paths are refused');
+    const [b] = await q(`insert into recurring_expenses (title, category, amount, next_due) values ('Notion', 'tools', 10, current_date + 5) returning id`);
+    await q(`update recurring_expenses set attachments = $2 where id = $1`, [b.id, pdf(`bill/${b.id}`, 'contract.pdf')]);
+    ok((await q(`select jsonb_array_length(attachments) n from recurring_expenses where id = $1`, [b.id]))[0].n === 1, 'finance can attach a file to a bill');
+    globalThis.__p12 = { e: e.id, b: b.id };
+  });
+  const { e, b } = globalThis.__p12;
+  await as(SR, async () => ok(!(await q(`select can_finance_file($1, 'view') v`, [`expense/${e}/abc-receipt.pdf`]))[0].v && !(await q(`select can_finance_file($1, 'view') v`, [`bill/${b}/abc-contract.pdf`]))[0].v, 'sales rep can\'t open finance files'));
+  const [sal] = await as(MG, () => q(`insert into expenses (title, category, amount, payee_member) values ('Salary – SR', 'salary', 300, $1) returning id`, [SR]));
+  await as(MG, async () => ok((await q(`select can_finance_file($1, 'edit') v`, [`expense/${sal.id}/slip.pdf`]))[0].v, 'manager can attach a salary slip'));
+  await as(FN, async () => ok(!(await q(`select can_finance_file($1, 'view') v`, [`expense/${sal.id}/slip.pdf`]))[0].v, 'finance role can\'t open salary attachments'));
+}
+
+
+console.log('Part 13: force delete a task');
+{
+  const [ft] = await as(A, () => q(`insert into tasks (title, assigned_to) values ('Force me', $1) returning id`, [M1]));
+  await as(M1, () => q(`select timer_start($1)`, [ft.id]));
+  await as(M1, () => q(`select timer_stop($1)`, [ft.id]));
+  await as(M1, () => q(`insert into task_comments (task_id, body) values ($1, 'link')`, [ft.id]).catch(() => null));
+  await as(A, () => expectErr(() => q(`delete from tasks where id=$1`, [ft.id]), 'normal delete still blocked when time is tracked'));
+  await as(M1, () => expectErr(() => q(`select task_force_delete($1)`, [ft.id]), 'member cannot force delete', /admin or a manager/));
+  await as(MG, () => q(`select task_force_delete($1)`, [ft.id]));
+  ok((await q(`select count(*)::int c from tasks where id=$1`, [ft.id]))[0].c === 0, 'manager force deleted the task');
+  ok((await q(`select count(*)::int c from task_time_entries where task_id=$1`, [ft.id]))[0].c === 0, 'its time entries are gone');
+  ok((await q(`select count(*)::int c from activity_logs where action='task_force_deleted' and entity_id=$1`, [String(ft.id)]))[0].c === 1, 'force delete is logged with details');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
